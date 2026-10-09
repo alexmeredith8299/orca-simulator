@@ -40,9 +40,11 @@ pytest
   `BurnController`) and `mission/takes.py` (take rule, target, constraints).
 - `src/expand3/vehicle/eps.py`: `Eps.step` per control tick (strings, loads, pack, voltage,
   latches, node heat) and the per-tick `EpsHistory`.
+- `src/expand3/vehicle/thermal.py`: `Network` (node equation, Euler step, stability limit),
+  `Thermal` (topology from params) and `step_power_and_thermal` (the per-tick coupling).
 - `src/expand3/mission/thread.py`: `run_mission(params, seed)` runs all six vehicles end to end
   and returns per-tick truth: r, v, q, omega, wheel h, mass, gates, the burn log, the take
-  records and `eps[sat]`.
+  records, `eps[sat]` and `thermal[sat]`.
 - `src/expand3/constellation.py`: `propagate_constellation` gives r and v at ticks, plus the Sun,
   the shadow fraction and station visibility.
 - `src/expand3/units.py`: definitional unit conversions only.
@@ -182,10 +184,8 @@ silent"):
 
 M4 choices where the spec is silent:
 
-- **Temporary temperatures.** Until M5, EPS reads the fixed node temperatures in
-  `scenario.placeholder_node_temperature_K`: wings 298.15 K, battery and payload 293.15 K. At
-  these temperatures the heaters and the cold-charge inhibit never act in a nominal run. EPS
-  takes a node-to-K mapping, so M5 plugs in without changes to `eps.py`.
+- **Placeholder temperatures** (`scenario.placeholder_node_temperature_K`) are now used only by
+  the EPS unit tests. `run_mission` feeds EPS the M5 network's temperatures.
 - **Initial state.** SoC is 0.8 (`scenario.eps_initial_soc`) and every latch is off.
 - **Strings.** String k sits on wing k (in `wings.names` order) and faces the wing normal (+z).
   Its temperature is that wing node's.
@@ -208,4 +208,35 @@ M4 choices where the spec is silent:
   converter loss is D(1 - eta_bl). Both heat bus_nz. Heater heat comes through their load rows.
 - **Read-once values.** R (F1) and string health (F2) are read through ParamView every tick. The
   other EPS values are read once per `Eps`, which is fine for faults that set them at construction.
+
+M5 choices where the spec is silent:
+
+- **Topology reading.**
+  - bus_core links to each of the six faces at 20 W/K.
+  - The side faces form a ring, px-py-nx-ny-px, at 6.0 W/K; opposite faces are not linked.
+  - Links named `<a>_to_<b>_W_K` (bus_pz-bus_px, bus_nz-bus_nx) join those two nodes.
+  - Each wing links to the face with the same suffix through its hinge.
+  - Each internal node links only to bus_core.
+  - This reading gives explicit-Euler limits 2/lambda_max of 102.8 s (Bus A) and 124.0 s (Bus B)
+    at 290 K, matching the spec's ~103 s and ~124 s.
+- **Areas.** A_si is the face area, or a wing's sunward side, for every source; IR uses the same
+  A_si and the view factor. A_i is the full area, both sides for a wing.
+- **Coupling order.** Each tick, EPS runs with the node temperatures at the tick start, then the
+  network takes one Euler step with that tick's EPS node heat.
+- **Initial temperature.** Every node starts at 293.15 K (`scenario.thermal_initial_K`).
+- **Settling.**
+  - The forcing is not strictly periodic: passes add 60 W of radio heat 0-3 times per orbit, which
+    moves even orbit means by about 0.3 K. Settling is therefore measured as the time after which
+    runs started 20 K hotter and 20 K colder agree.
+  - Agreement to 1 K comes at 29 h on Bus A and 35 h on Bus B; to 0.1 K at 44 h and 54 h.
+  - The battery is the slowest node: C = 8000 J/K on 0.4 W/K, a 5.6 h time constant.
+- **F7 signature.**
+  - In idle Sun hold, +z is on the Sun, so bus_px is edge-on and gets no direct Sun. F7
+    (alpha, epsilon x3) adds albedo absorption and extra IR loss.
+  - bus_px is tied to bus_core at 20 W/K, so the whole vehicle cools about 1.5 K and bus_px cools
+    most (1.7 K). Orbital swings change by less than 0.1 K.
+  - The spec's "swing grows and the core carries it inward" would need bus_px to see the Sun,
+    which it does only in some burn attitudes. The F7 test asserts the measured signature.
+- **Heaters.** In nominal runs the battery stays at 286-292 K and the payload at 282-291 K, so
+  neither heater ever cycles.
 

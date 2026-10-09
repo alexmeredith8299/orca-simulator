@@ -42,10 +42,10 @@ from expand3.mission.takes import (
 )
 from expand3.params import Params, ParamView
 from expand3.timebase import Clock, SeedDraws, draw_seed
-from expand3.vehicle.attitude import quat_conj, quat_mul, quat_rotate, quat_to_dcm
-from expand3.vehicle.eps import Eps, EpsHistory, EpsInputs, history, placeholder_temperatures
+from expand3.vehicle.attitude import quat_conj, quat_mul, quat_rotate
+from expand3.vehicle.eps import Eps, EpsHistory, EpsInputs, history
 from expand3.vehicle.orbit import Forces, OrbitModel, initial_states, rk4_step
-from expand3.vehicle.thermal import ThermalHistory
+from expand3.vehicle.thermal import Thermal, ThermalHistory, step_power_and_thermal, thermal_env
 from expand3.vehicle.thruster import thrust_step
 
 F64 = NDArray[np.float64]
@@ -256,11 +256,13 @@ def run_mission(
         v0.get("scenario.constants.R_E_km"), v0.get("scenario.constants.R_sun_km"),
     )
     gate_pass = elev >= mask
-    eps = {
-        sat: _run_eps(views[sat], k, t, tick, q, shadow, sun_u, gate_pass, takes.get(sat),
-                      slews.get(sat, []))
-        for k, sat in enumerate(sats)
-    }
+    eps: dict[str, EpsHistory] = {}
+    thermal: dict[str, ThermalHistory] = {}
+    for k, sat in enumerate(sats):
+        eps[sat], thermal[sat] = _run_power_thermal(
+            views[sat], k, t, tick, q, traj.r, shadow, sun_u, gate_pass, takes.get(sat),
+            slews.get(sat, []),
+        )
     return MissionRun(
         draws=draws,
         sats=sats,
@@ -289,6 +291,7 @@ def run_mission(
         slews=slews,
         wall_s=time.perf_counter() - start_wall,
         eps=eps,
+        thermal=thermal,
     )
 
 
@@ -457,41 +460,45 @@ def _wheel_power_per_tick(
     return out
 
 
-def _run_eps(
+def _run_power_thermal(
     view: ParamView,
     k: int,
     t: F64,
     tick: float,
     q: F64,
+    r: F64,
     shadow: F64,
     sun_u: F64,
     gate_pass: B,
     take: TakeRecord | None,
     slews: list[SlewResult],
-) -> EpsHistory:
-    """Step one vehicle's EPS over every tick (Spec: Model: electrical power). The take load
-    applies to ticks with t_take <= t < t_end. Node temperatures are the placeholder until M5,
-    and the SAA edge-computer gate is off until M6."""
+) -> tuple[EpsHistory, ThermalHistory]:
+    """Step one vehicle's EPS and thermal network over every tick (Spec: Model: electrical
+    power; Model: thermal network). Each tick EPS runs with the node temperatures at the tick
+    start, then the network steps with that tick's node heat. The take load applies to ticks
+    with t_take <= t < t_end. The SAA edge-computer gate is off until M6."""
     eps = Eps(view)
+    th = Thermal(view)
     state = eps.initial_state()
-    temps = placeholder_temperatures(view)
+    T = th.initial_temps()
     wheel_w = _wheel_power_per_tick(t, tick, take, slews, view.get("scenario.slew.step_s"))
     steps = []
+    temps = np.empty((len(t), len(th.names)))
     for n in range(len(t)):
-        sun_body = quat_to_dcm(q[n, k]).T @ sun_u[n]
+        temps[n] = T
+        env = thermal_env(q[n, k], r[n, k], sun_u[n], float(shadow[n, k]))
         in_take = take is not None and take.t_take_s <= t[n] < take.t_end_s
-        step, state = eps.step(
-            state,
+        step, state, T = step_power_and_thermal(
+            eps, th, state, T,
             EpsInputs(
-                shadow=float(shadow[n, k]),
-                sun_body=sun_body,
-                node_temps_K=temps,
+                shadow=env.shadow,
+                sun_body=env.sun_body,
+                node_temps_K={},
                 in_pass=bool(gate_pass[n, k].any()),
                 take=bool(in_take),
                 wheel_power_W=float(wheel_w[n]),
             ),
-            tick,
+            env, tick,
         )
         steps.append(step)
-    return history(t, steps)
-
+    return history(t, steps), ThermalHistory(t, list(th.names), temps)
