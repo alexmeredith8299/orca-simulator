@@ -62,3 +62,4 @@ warn_required_dynamic_aliases = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["-ra", "--strict-markers"]
+markers = ["slow: long propagations (72 h); run by default and in CI, skip with -m 'not slow'"]
