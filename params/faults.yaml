@@ -1,0 +1,13 @@
+# theta(t) = theta0 * (1 + (m - 1) * s(t)). Source: EXPAND.3 Phase I spec, Faults.
+# F3 and F8 set the parameter directly (nominal is zero). One fault per seed, uniform over ten.
+F1:  {name: battery resistance growth, vehicle: SAT-2, param: eps.R_pack_ohm, m: 3, profile: ramp, t_r_s: 21600}
+F2:  {name: solar string open, vehicle: SAT-2, param: "eps.string_health[0]", m: 0, profile: step}
+F3:  {name: wheel bearing friction, vehicle: SAT-3, param: "wheels.c[0]", set_to: 0.02, profile: step}
+F4:  {name: wheel torque constant, vehicle: SAT-3, param: "wheels.k[1]", m: 0.5, profile: step}
+F5:  {name: catalyst-bed Isp loss, vehicle: SAT-4, params: [thruster.eta_F, thruster.Isp_s], m: 0.7, profile: step, note: mass flow unchanged}
+F6:  {name: stuck valve, vehicle: SAT-4, param: thruster.eta_F, m: 0.7, profile: step, note: "mass flow falls to 0.7x, Isp unchanged"}
+F7:  {name: MLI degradation, vehicle: SAT-2, params: [thermal.nodes.bus_px.alpha, thermal.nodes.bus_px.epsilon], m: 3, cap: 1.0, profile: step}
+F8:  {name: crosslink margin loss, vehicle: SAT-2, param: crosslink.drop_probability, set_to: 0.9, profile: step}
+F9:  {name: SAA upset rate, vehicle: SAT-2, param: cdh_upsets.lambda_in_per_s, m: 50, profile: step}
+F10: {name: imager dark current, vehicle: SAT-2, param: imager_dark_current.D0_e_s_px, m: 4, profile: step}
+onset: {t0: "fault_lead_s before the faulted vehicle's time-critical take", arm: "first control tick at or after t0, whether or not the take flies", duration: to end of run}

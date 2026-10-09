@@ -1,0 +1,83 @@
+# Bus A (SAT-1 to SAT-4). Source: EXPAND.3 Phase I spec, Parameters > Vehicle and actuators, Electrical power, Loads, Thermal.
+mass:
+  wet_mass_kg: 150
+  inertia_diag_kg_m2: [16, 15, 11]
+  airframe_box_m: [0.6, 0.7, 0.9]
+drag: {Cd: 2.2, area_m2: 0.9}
+wings: {count: 4, names: [wing_px, wing_nx, wing_py, wing_ny], sunward_area_m2: 0.40, hinge: "+z edges", normal: "+z"}
+thruster: {face: "-x", axis_b: [1, 0, 0], F_max_N: 4, Isp_s: 220, propellant_kg: 8, eta_F: 1}
+wheels:
+  count: 4
+  spin_axis_angle_off_z_deg: 54.7
+  tau_max_Nm: 0.1
+  h_max_Nms: 4
+  power_while_torquing_W: 10
+  k: [1, 1, 1, 1]          # torque constant, dimensionless (spec Model: actuators)
+  c: [0, 0, 0, 0]          # bearing friction, 1/s (spec Model: actuators)
+star_tracker: {face: "-y", tilt_below_level_deg: 8, sun_exclusion_deg: 30, earth_exclusion_deg: 25, noise_cross_arcsec: 2, noise_roll_arcsec: 20}
+imager: {pixels: 4096, fov_deg: 2, face: "-z"}
+crosslink: {band: S, range_km: 1500, rate_Mbit_s: 1}
+eps:
+  strings: 4
+  string_area_m2: 0.40
+  string_health: [1, 1, 1, 1]   # o_k, 1 = healthy string (spec Model: electrical power)
+  packing: 0.85
+  eta0: 0.29
+  T0_K: 298.15
+  deta_dT_per_K: -3.0e-4
+  eta_ab: 0.93
+  eta_bl: 0.92
+  battery: 8s4p Li-ion
+  E_cap_J: 3.6e6
+  R_pack_ohm: 0.08
+  eta_c: 0.96
+  eta_d: 0.98
+  P_c_max_W: 300
+  ocv_curve: {soc: [0, 0.1, 0.3, 0.5, 0.7, 0.9, 1.0], volts: [25.6, 28.0, 29.6, 30.4, 31.4, 32.8, 33.6]}
+  usable_derate: {T_K: [253.15, 273.15, 298.15, 318.15, 333.15], factor: [0.65, 0.88, 1.00, 0.97, 0.85]}
+  undervoltage: {shed_V: 26.4, release_V: 28.0}
+  cold_charge_inhibit: {inhibit_K: 273.15, release_K: 276.15}   # sensed battery temperature
+  battery_heater: {power_W: 15, on_K: 283.15, off_K: 288.15}
+  payload_heater: {power_W: 10, on_K: 263.15, off_K: 268.15}
+  heater_cutoff_true_K: 313.15
+loads:   # draw W; shed tier; heat fraction; node
+  obc:             {draw_W: 12, tier: survival, heat_fraction: 1.00, node: obc}
+  radio_receiver:  {draw_W: 3, tier: survival, heat_fraction: 1.00, node: radio_pa}
+  adcs:            {draw_W: 20, take_W: 25, plus: wheel torquing power per wheel during a slew, tier: attitude, heat_fraction: 0.80, node: bus_nz}
+  edge_computer:   {draw_W: 15, off_in_saa_and_reboot_W: 0, tier: attitude, heat_fraction: 1.00, node: obc}
+  s_band_tx:       {pass_no_take_W: 15, else_W: 0, tier: comms, heat_fraction: 0.65, node: radio_pa}
+  x_band_downlink: {pass_no_take_W: 45, else_W: 0, tier: comms, heat_fraction: 0.70, node: radio_pa}
+  crosslink:       {draw_W: 6, tier: comms, heat_fraction: 0.70, node: radio_pa}
+  imager:          {draw_W: 10, take_W: 60, tier: payload, heat_fraction: 1.00, node: payload}
+  battery_heater:  {on_W: 15, tier: survival, heat_fraction: 1.00, node: battery}
+  payload_heater:  {on_W: 10, tier: attitude, heat_fraction: 1.00, node: payload}
+undervoltage_sheds_tiers: [attitude, comms, payload]
+thermal:
+  nodes:
+    bus_px: {area_m2: 0.63, C_J_K: 2500, alpha: 0.08, epsilon: 0.03, normal: "+x", view: 0.20}
+    bus_nx: {area_m2: 0.63, C_J_K: 2500, alpha: 0.08, epsilon: 0.03, normal: "-x", view: 0.20}
+    bus_py: {area_m2: 0.54, C_J_K: 2500, alpha: 0.08, epsilon: 0.03, normal: "+y", view: 0.20}
+    bus_ny: {area_m2: 0.54, C_J_K: 2500, alpha: 0.08, epsilon: 0.03, normal: "-y", view: 0.20}
+    bus_pz: {area_m2: 0.42, C_J_K: 2500, alpha: 0.08, epsilon: 0.03, normal: "+z", view: 0.20}
+    bus_nz: {area_m2: 0.42, C_J_K: 2500, alpha: 0.20, epsilon: 0.85, normal: "-z", view: 0.20, note: white-paint radiator}
+    wing_px: {area_m2: 0.80, sunward_m2: 0.40, C_J_K: 2000, alpha: 0.88, epsilon: 0.85, normal: "+z", view: 0.15}
+    wing_nx: {area_m2: 0.80, sunward_m2: 0.40, C_J_K: 2000, alpha: 0.88, epsilon: 0.85, normal: "+z", view: 0.15}
+    wing_py: {area_m2: 0.80, sunward_m2: 0.40, C_J_K: 2000, alpha: 0.88, epsilon: 0.85, normal: "+z", view: 0.15}
+    wing_ny: {area_m2: 0.80, sunward_m2: 0.40, C_J_K: 2000, alpha: 0.88, epsilon: 0.85, normal: "+z", view: 0.15}
+    battery:  {C_J_K: 8000, G_to_core_W_K: 0.4}
+    obc:      {C_J_K: 2000, G_to_core_W_K: 9.0}
+    radio_pa: {C_J_K: 1500, G_to_core_W_K: 11.0}
+    payload:  {C_J_K: 12000, G_to_core_W_K: 7.5}
+    bus_core: {C_J_K: 60000, G_to_each_face_W_K: 20}
+  links:
+    face_to_face_around_sides_W_K: 6.0
+    bus_pz_to_bus_px_W_K: 4.5
+    bus_nz_to_bus_nx_W_K: 4.5
+    wing_to_its_face_hinge_W_K: 1.5
+  limits_K:
+    battery: [273.15, 318.15]
+    obc: [218.15, 333.15]
+    radio_pa: [218.15, 333.15]
+    payload: [218.15, 333.15]
+    others: [173.15, 353.15]
+  stability_limit_s: 103

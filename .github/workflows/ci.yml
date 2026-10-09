@@ -1,0 +1,26 @@
+# Note: GitHub Enterprise at MIT (github.mit.edu) may not provide hosted Actions runners.
+# If jobs never start, run the same three commands locally or register a self-hosted runner.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[dev]'
+      - name: Ruff
+        run: ruff check .
+      - name: Mypy
+        run: mypy src
+      - name: Pytest
+        run: pytest
