@@ -132,6 +132,17 @@ class DragEnv(_Model):
     H_km: Draw
 
 
+class Slew(_Model):
+    step_s: float
+    torque_fraction: float = Field(gt=0, le=1)
+    momentum_fraction: float = Field(gt=0, le=1)
+    pd_natural_freq_rad_s: float
+    pd_damping: float
+    tol_angle_deg: float
+    tol_rate_rad_s: float
+    max_settle_s: float
+
+
 class Scenario(_Model):
     orbit: Orbit
     true_anomaly_at_epoch_deg: dict[SatId, float]
@@ -147,6 +158,7 @@ class Scenario(_Model):
     elevation_mask_deg: float
     burn_command_time_h: Draw
     station_keeping_burn_length_h: Nominal
+    slew: Slew
     take_window_start_h: float
     take_constraints: TakeConstraints
     fault_lead_s: Draw
@@ -210,11 +222,12 @@ class Wheels(_Model):
     power_while_torquing_W: float
     k: list[float]  # torque constant, dimensionless
     c: list[float]  # bearing friction, 1/s
+    azimuth_deg: list[float]
 
     @model_validator(mode="after")
     def _count(self) -> Self:
-        if not len(self.k) == len(self.c) == self.count:
-            raise ValueError("wheels.k and wheels.c lengths must equal wheels.count")
+        if not len(self.k) == len(self.c) == len(self.azimuth_deg) == self.count:
+            raise ValueError("wheels.k, c and azimuth_deg lengths must equal wheels.count")
         return self
 
 
