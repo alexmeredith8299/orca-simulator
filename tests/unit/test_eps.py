@@ -240,10 +240,13 @@ def test_f1_resistance_ramp(params: Params) -> None:
         assert b.E_J == a.E_J  # R sets the voltage only
         assert b.soc == a.soc
         if a.p_pack_W < 0:
-            sags.append(((b.ocv_V - b.v_V) / (a.ocv_V - a.v_V), fview.get("eps.R_pack_ohm") / r0))
+            r_now = fview.get("eps.R_pack_ohm")
+            # sag is I R exactly; for the same pack power I rises slightly as V falls
+            assert (b.ocv_V - b.v_V) / -b.i_A == pytest.approx(r_now, rel=1e-12)
+            sags.append(((b.ocv_V - b.v_V) / (a.ocv_V - a.v_V), r_now / r0))
     ratio, r_ratio = np.array(sags).T
-    np.testing.assert_allclose(ratio, r_ratio, rtol=0.01)
-    assert r_ratio.max() == pytest.approx(3.0)
+    np.testing.assert_allclose(ratio, r_ratio, rtol=0.03)
+    assert r_ratio.max() == pytest.approx(3.0, abs=0.01)
 
 
 def test_f1_reflex_fires_earlier(params: Params) -> None:

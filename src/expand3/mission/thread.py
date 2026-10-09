@@ -42,8 +42,8 @@ from expand3.mission.takes import (
 )
 from expand3.params import Params, ParamView
 from expand3.timebase import Clock, SeedDraws, draw_seed
-from expand3.vehicle.attitude import quat_conj, quat_mul, quat_rotate
-from expand3.vehicle.eps import EpsHistory
+from expand3.vehicle.attitude import quat_conj, quat_mul, quat_rotate, quat_to_dcm
+from expand3.vehicle.eps import Eps, EpsHistory, EpsInputs, history, placeholder_temperatures
 from expand3.vehicle.orbit import Forces, OrbitModel, initial_states, rk4_step
 from expand3.vehicle.thruster import thrust_step
 
@@ -253,6 +253,12 @@ def run_mission(
         traj.r, sun_u[:, None, :], sun_d[:, None],
         v0.get("scenario.constants.R_E_km"), v0.get("scenario.constants.R_sun_km"),
     )
+    gate_pass = elev >= mask
+    eps = {
+        sat: _run_eps(views[sat], k, t, tick, q, shadow, sun_u, gate_pass, takes.get(sat),
+                      slews.get(sat, []))
+        for k, sat in enumerate(sats)
+    }
     return MissionRun(
         draws=draws,
         sats=sats,
@@ -267,7 +273,7 @@ def run_mission(
         propellant_kg=traj.prop,
         a_cmd_m_s2=traj.a_cmd,
         dv_m_s=traj.dv,
-        gate_pass=elev >= mask,
+        gate_pass=gate_pass,
         gate_take=gate_take,
         gate_slew=gate_slew,
         gate_burn=traj.burning,
@@ -280,6 +286,7 @@ def run_mission(
         takes=takes,
         slews=slews,
         wall_s=time.perf_counter() - start_wall,
+        eps=eps,
     )
 
 
@@ -429,3 +436,60 @@ def _plan_take(
     )
     return _TakePlan(n, target, float(lat[0]), float(lon[0]), t_take, t_end, q0, q_take,
                      t_slew_in, q_take_end, q_idle_end, window)
+
+
+def _wheel_power_per_tick(
+    t: F64, tick: float, take: TakeRecord | None, slews: list[SlewResult], step_s: float
+) -> F64:
+    """Mean wheel torquing power over each tick interval [t_n, t_n + tick) from the slew
+    histories (each slew step's power lasts one slew step)."""
+    out = np.zeros(len(t))
+    if take is None:
+        return out
+    for res, t0 in zip(slews, (take.slew_in_start_s, take.t_end_s), strict=False):
+        for t_end_rel, p in zip(res.t_s, res.power_W, strict=True):
+            mid = t0 + float(t_end_rel) - 0.5 * step_s
+            n = int(mid // tick)
+            if 0 <= n < len(t):
+                out[n] += float(p) * step_s / tick
+    return out
+
+
+def _run_eps(
+    view: ParamView,
+    k: int,
+    t: F64,
+    tick: float,
+    q: F64,
+    shadow: F64,
+    sun_u: F64,
+    gate_pass: B,
+    take: TakeRecord | None,
+    slews: list[SlewResult],
+) -> EpsHistory:
+    """Step one vehicle's EPS over every tick (Spec: Model: electrical power). The take load
+    applies to ticks with t_take <= t < t_end. Node temperatures are the placeholder until M5,
+    and the SAA edge-computer gate is off until M6."""
+    eps = Eps(view)
+    state = eps.initial_state()
+    temps = placeholder_temperatures(view)
+    wheel_w = _wheel_power_per_tick(t, tick, take, slews, view.get("scenario.slew.step_s"))
+    steps = []
+    for n in range(len(t)):
+        sun_body = quat_to_dcm(q[n, k]).T @ sun_u[n]
+        in_take = take is not None and take.t_take_s <= t[n] < take.t_end_s
+        step, state = eps.step(
+            state,
+            EpsInputs(
+                shadow=float(shadow[n, k]),
+                sun_body=sun_body,
+                node_temps_K=temps,
+                in_pass=bool(gate_pass[n, k].any()),
+                take=bool(in_take),
+                wheel_power_W=float(wheel_w[n]),
+            ),
+            tick,
+        )
+        steps.append(step)
+    return history(t, steps)
+

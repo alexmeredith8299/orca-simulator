@@ -38,9 +38,11 @@ pytest
   plus PD slews).
 - `src/expand3/vehicle/thruster.py` (`thrust_step`), `mission/burns.py` (burn plan and
   `BurnController`) and `mission/takes.py` (take rule, target, constraints).
+- `src/expand3/vehicle/eps.py`: `Eps.step` per control tick (strings, loads, pack, voltage,
+  latches, node heat) and the per-tick `EpsHistory`.
 - `src/expand3/mission/thread.py`: `run_mission(params, seed)` runs all six vehicles end to end
-  and returns per-tick truth: r, v, q, omega, wheel h, mass, gates, the burn log and the take
-  records.
+  and returns per-tick truth: r, v, q, omega, wheel h, mass, gates, the burn log, the take
+  records and `eps[sat]`.
 - `src/expand3/constellation.py`: `propagate_constellation` gives r and v at ticks, plus the Sun,
   the shadow fraction and station visibility.
 - `src/expand3/units.py`: definitional unit conversions only.
@@ -177,4 +179,33 @@ silent"):
   between idle and burn attitude are instantaneous.
 - **A zero-magnitude burn** (for example a delta-v override of 0) runs the timeline but orders no
   thrust and keeps the idle attitude.
+
+M4 choices where the spec is silent:
+
+- **Temporary temperatures.** Until M5, EPS reads the fixed node temperatures in
+  `scenario.placeholder_node_temperature_K`: wings 298.15 K, battery and payload 293.15 K. At
+  these temperatures the heaters and the cold-charge inhibit never act in a nominal run. EPS
+  takes a node-to-K mapping, so M5 plugs in without changes to `eps.py`.
+- **Initial state.** SoC is 0.8 (`scenario.eps_initial_soc`) and every latch is off.
+- **Strings.** String k sits on wing k (in `wings.names` order) and faces the wing normal (+z).
+  Its temperature is that wing node's.
+- **Tick stepping.** E advances explicitly over the 30 s tick, and V and I use the SoC at the
+  tick start. Tables interpolate linearly and clamp at their ends.
+- **Latches.** Undervoltage hold, cold-charge inhibit and heater states are evaluated on a tick's
+  values and applied from the next tick. Undervoltage uses the true terminal voltage, and the
+  heater thermostats use true node temperatures. The cold-charge inhibit takes a sensed battery
+  temperature when given (M6 supplies the thermistor value) and otherwise uses the true one.
+- **Gates.** The take load applies to ticks with t_take <= t < t_end. Wheel torquing power is the
+  mean over the tick of the M2 slew power (10 or 8 W per torquing wheel). The edge computer's SAA
+  gate is off until M6.
+- **Unmet demand and curtailment.** Unmet demand (N- minus P_sup) and curtailed array power
+  (N+ minus P_acc) are recorded as truth; loads are not browned out except through the
+  undervoltage reflex.
+- **Voltage discriminant.** A negative OCV^2 + 4 P_pack R is clamped to 0 and flagged per tick
+  (`disc_clamped`). It never happens in a nominal run.
+- **Converter heat.** The array converter loss uses the accepted array power,
+  (P_gen - curtailed)(1/eta_ab - 1), because curtailed power is never converted. The load
+  converter loss is D(1 - eta_bl). Both heat bus_nz. Heater heat comes through their load rows.
+- **Read-once values.** R (F1) and string health (F2) are read through ParamView every tick. The
+  other EPS values are read once per `Eps`, which is fine for faults that set them at construction.
 
