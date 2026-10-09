@@ -51,7 +51,7 @@ strict = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["ppigrf", "ppigrf.*", "scipy", "scipy.*", "astropy", "astropy.*"]
+module = ["ppigrf", "ppigrf.*", "scipy", "scipy.*", "astropy", "astropy.*", "erfa", "erfa.*"]
 ignore_missing_imports = true
 
 [tool.pydantic-mypy]
@@ -62,3 +62,4 @@ warn_required_dynamic_aliases = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["-ra", "--strict-markers"]
+markers = ["slow: long propagations (72 h); run by default and in CI, skip with -m 'not slow'"]

@@ -122,6 +122,8 @@ class Constants(_Model):
     q_IR_W_m2: float
     sigma_W_m2_K4: float
     g0_m_s2: float
+    omega_E_rad_s: float
+    R_sun_km: float
 
 
 class DragEnv(_Model):

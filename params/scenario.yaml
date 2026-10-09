@@ -33,6 +33,8 @@ constants:
   q_IR_W_m2: 237
   sigma_W_m2_K4: 5.670374e-8
   g0_m_s2: 9.80665
+  omega_E_rad_s: 7.2921159e-5   # not in spec: Earth rotation rate, IERS Conventions (2010) nominal
+  R_sun_km: 695700             # not in spec: nominal solar radius, IAU 2015 Resolution B3 (dual-cone eclipse)
 drag:
   h0_km: 525
   rho0_kg_m3: {draw: loguniform, low: 1.0e-13, high: 1.0e-12}
