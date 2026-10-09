@@ -158,6 +158,9 @@ class Scenario(_Model):
     elevation_mask_deg: float
     burn_command_time_h: Draw
     station_keeping_burn_length_h: Nominal
+    station_keeping_burn_length_draw_h: Draw
+    station_keeping_dv_m_s: float
+    take_duration_s: float
     slew: Slew
     take_window_start_h: float
     take_constraints: TakeConstraints

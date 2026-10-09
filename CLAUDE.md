@@ -36,6 +36,11 @@ pytest
   `vehicle/wheels.py` (`WheelArray`).
 - `src/expand3/mission/pointing.py` (Sun hold, burn and take laws) and `mission/slew.py` (plan
   plus PD slews).
+- `src/expand3/vehicle/thruster.py` (`thrust_step`), `mission/burns.py` (burn plan and
+  `BurnController`) and `mission/takes.py` (take rule, target, constraints).
+- `src/expand3/mission/thread.py`: `run_mission(params, seed)` runs all six vehicles end to end
+  and returns per-tick truth: r, v, q, omega, wheel h, mass, gates, the burn log and the take
+  records.
 - `src/expand3/constellation.py`: `propagate_constellation` gives r and v at ticks, plus the Sun,
   the shadow fraction and station visibility.
 - `src/expand3/units.py`: definitional unit conversions only.
@@ -139,4 +144,37 @@ M2 choices where the spec is silent:
   gyroscopic feedforward. A slew is done when the error is below 0.1 deg and the rate below
   1e-4 rad/s, and gives up 300 s after the planned end.
 - **Slew step** is 1 s (`slew.step_s`), inside the 30 s control tick.
+
+M3 choices where the spec is silent (new values are in `scenario.yaml`, marked "default, spec
+silent"):
+
+- **Burn length** is drawn once per seed, U(5, 7) h (`station_keeping_burn_length_draw_h`), and
+  rounded to whole 10 s integration steps. All burn timing sits on that step grid.
+- **Ordered acceleration** is prograde, re-aimed along v at each 10 s step (zero-order hold).
+  Its constant magnitude is sized so the delivered delta-v is `station_keeping_dv_m_s` = 1.0 m/s
+  at the nominal (loaded) eta_F. Under F5 or F6 the delivered delta-v falls to 0.7 m/s.
+- **Uplink** happens in the first pass (any station) with a visible tick at or after the
+  command time, so a command issued during a pass uplinks in that pass. The burn starts at the
+  first tick after that pass ends (loss of signal).
+- **Mass** is dry mass (wet minus propellant) plus the propellant remaining. Drag and thrust use
+  the mass at each step's start, and thrust stops when the tank is empty.
+- **Take time** is the first tick at or after 30 h where the Sun is at least 10 deg above the
+  horizon at the geodetic sub-satellite point. The target is that WGS84 point, fixed in ECEF, so
+  off-nadir is near 0 at take start; it is measured from geocentric nadir. The take lasts
+  `take_duration_s` = 60 s, with the take law re-aimed at every tick. At 60 s off-nadir reaches
+  about 38 deg, under the 45 deg limit.
+- **Slews around a take.** The slew in is a rest-to-rest slew from the attitude of the mode in
+  force at its start (idle, or burn if burning) to the take attitude at take start. Its start is
+  iterated so its planned duration ends exactly at take start. The slew out goes from the take
+  attitude at take end to the idle attitude at that time. Pointing is ideal during the take
+  itself.
+- **Burn and take conflict.** A burn is suspended over [slew-in start, slew-out end], rounded
+  outward to the 10 s grid, and resumes afterwards; its end is extended so the full length is
+  flown. The run integrates again when a suspension is needed and replans the take from the new
+  trajectory.
+- **Between slews.** The body rate is the finite-difference rate of the ideal attitude from tick
+  to tick, and wheel momentum is held constant (wheels are modeled only during slews). Switches
+  between idle and burn attitude are instantaneous.
+- **A zero-magnitude burn** (for example a delta-v override of 0) runs the timeline but orders no
+  thrust and keeps the idle attitude.
 

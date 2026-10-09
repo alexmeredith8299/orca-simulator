@@ -21,6 +21,9 @@ ground_stations:
 elevation_mask_deg: 5
 burn_command_time_h: {draw: uniform, low: 12, high: 36, per: burn_vehicle}
 station_keeping_burn_length_h: {nominal: 6, note: "About 6 h; varies by seed (distribution not specified, see spec gap)"}
+station_keeping_burn_length_draw_h: {draw: uniform, low: 5, high: 7}   # default, spec silent ("about 6 h; varies by seed")
+station_keeping_dv_m_s: 1.0     # default, spec silent: delivered delta-v at nominal eta_F, prograde
+take_duration_s: 60             # default, spec silent
 # Slew defaults: not in spec (spec: "minimum-torque plan with a PD trim"). See CLAUDE.md Known gaps.
 slew:
   step_s: 1                  # attitude + wheel integration step inside the control tick

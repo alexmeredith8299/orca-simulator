@@ -65,6 +65,7 @@ class OrbitModel:
     h0_km: float
     H_km: float
     forces: Forces = field(default_factory=Forces)
+    cd_area_m2: F64 | None = None
 
     @classmethod
     def from_params(
@@ -88,10 +89,14 @@ class OrbitModel:
             h0_km=v0.get("scenario.drag.h0_km"),
             H_km=draws.H_km,
             forces=forces,
+            cd_area_m2=np.array([v.get("drag.Cd") * v.get("drag.area_m2") for v in views]),
         )
 
-    def accel(self, r: F64, v: F64, a_thr: F64 | None = None) -> F64:
-        """Spec: Model: orbit and attitude, translational dynamics. r, v are (K, 3)."""
+    def accel(
+        self, r: F64, v: F64, a_thr: F64 | None = None, mass_kg: F64 | None = None
+    ) -> F64:
+        """Spec: Model: orbit and attitude, translational dynamics. r, v are (K, 3); a_thr is
+        (K, 3) in km/s^2; mass_kg (K,) is the current mass for drag (default: wet mass)."""
         rn = np.sqrt(np.einsum("ki,ki->k", r, r))[:, None]
         acc: F64 = -self.mu_km3_s2 * r / rn**3
         if self.forces.j2:
@@ -104,14 +109,21 @@ class OrbitModel:
             speed = np.sqrt(np.einsum("ki,ki->k", v_rel, v_rel))[:, None]
             rho = density_kg_m3(rn - self.R_E_km, self.rho0_kg_m3, self.h0_km, self.H_km)
             # rho [kg/m^3] * B [m^2/kg] is 1/m; x M_PER_KM gives 1/km, so a is in km/s^2.
-            acc = acc - 0.5 * rho * self.ballistic_m2_kg[:, None] * M_PER_KM * speed * v_rel
+            ballistic = (
+                self.ballistic_m2_kg
+                if mass_kg is None or self.cd_area_m2 is None
+                else self.cd_area_m2 / mass_kg
+            )
+            acc = acc - 0.5 * rho * ballistic[:, None] * M_PER_KM * speed * v_rel
         if a_thr is not None:
             acc = acc + a_thr
         return acc
 
-    def deriv(self, y: F64, a_thr: F64 | None = None) -> F64:
+    def deriv(self, y: F64, a_thr: F64 | None = None, mass_kg: F64 | None = None) -> F64:
         """y is (K, 6) = [r, v]; returns [v, a]."""
-        out: F64 = np.concatenate([y[:, 3:], self.accel(y[:, :3], y[:, 3:], a_thr)], axis=1)
+        out: F64 = np.concatenate(
+            [y[:, 3:], self.accel(y[:, :3], y[:, 3:], a_thr, mass_kg)], axis=1
+        )
         return out
 
 
