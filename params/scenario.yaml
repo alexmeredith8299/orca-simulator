@@ -21,6 +21,16 @@ ground_stations:
 elevation_mask_deg: 5
 burn_command_time_h: {draw: uniform, low: 12, high: 36, per: burn_vehicle}
 station_keeping_burn_length_h: {nominal: 6, note: "About 6 h; varies by seed (distribution not specified, see spec gap)"}
+# Slew defaults: not in spec (spec: "minimum-torque plan with a PD trim"). See CLAUDE.md Known gaps.
+slew:
+  step_s: 1                  # attitude + wheel integration step inside the control tick
+  torque_fraction: 0.8       # plan uses this fraction of the torque the array can deliver about the slew axis
+  momentum_fraction: 0.8     # and of the wheel momentum capacity (sets the coast rate)
+  pd_natural_freq_rad_s: 0.3
+  pd_damping: 0.9
+  tol_angle_deg: 0.1
+  tol_rate_rad_s: 1.0e-4
+  max_settle_s: 300          # give up this long after the planned end
 take_window_start_h: 30     # first point after 30 h where take constraints hold
 take_constraints: {max_off_nadir_deg: 45, min_sun_elevation_at_target_deg: 10}
 fault_lead_s: {draw: uniform, low: 5700, high: 11400}

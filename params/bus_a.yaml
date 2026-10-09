@@ -14,6 +14,7 @@ wheels:
   power_while_torquing_W: 10
   k: [1, 1, 1, 1]          # torque constant, dimensionless (spec Model: actuators)
   c: [0, 0, 0, 0]          # bearing friction, 1/s (spec Model: actuators)
+  azimuth_deg: [45, 135, 225, 315]   # not in spec: spin-axis azimuths about +z from +x
 star_tracker: {face: "-y", tilt_below_level_deg: 8, sun_exclusion_deg: 30, earth_exclusion_deg: 25, noise_cross_arcsec: 2, noise_roll_arcsec: 20}
 imager: {pixels: 4096, fov_deg: 2, face: "-z"}
 crosslink: {band: S, range_km: 1500, rate_Mbit_s: 1}
