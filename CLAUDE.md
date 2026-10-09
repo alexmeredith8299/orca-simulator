@@ -112,9 +112,10 @@ M2 choices where the spec is silent:
 
 - **Wheel azimuths** are 45, 135, 225 and 315 deg about +z from +x (`wheels.azimuth_deg`). The
   spec gives only the 54.7 deg cant.
-- **Wheel momentum update.** dh/dt = -(k u + c h) is integrated exactly over each step with u
-  held, so F3 friction decays as exp(-c t). The spec's discrete form is its first-order version.
-  Saturation clamps |h| at h_max, and the body torque is the matching -A dh/dt.
+- **Wheel momentum update.** The spec's first-order discrete update is used deliberately (Alex's
+  decision): h(t + dt) = h(t) - (k u + c h(t)) dt. Under F3 friction alone h_n = h_0 (1 - c dt)^n,
+  about 1 % off exp(-c t) after 50 s at the 1 s slew step. Saturation clamps |h| at h_max, and the
+  body torque is the matching -A dh/dt, which equals A (k o u + c o h(t)) when unsaturated.
 - **Wheel power** is charged per wheel whenever |u_k| > 0, including a saturated wheel that is
   still commanded.
 - **Rigid-body integration** uses the momentum form: inertial total momentum

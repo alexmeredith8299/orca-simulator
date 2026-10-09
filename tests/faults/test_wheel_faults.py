@@ -9,7 +9,7 @@ from expand3.vehicle.attitude import AttitudeState, inertia, quat_from_axis_angl
 from expand3.vehicle.wheels import WheelArray
 
 
-def test_f3_friction_decays_h1_exponentially(params: Params) -> None:
+def test_f3_friction_follows_spec_recurrence(params: Params) -> None:
     view = ParamView(params, "SAT-3")
     view.overrides["wheels.c[0]"] = 0.02
     w = WheelArray(view)
@@ -17,8 +17,11 @@ def test_f3_friction_decays_h1_exponentially(params: Params) -> None:
     h, dt = h0.copy(), 1.0
     for n in range(1, 301):
         h = w.advance(h, np.zeros(4), dt)
-        assert h[0] == pytest.approx(h0[0] * np.exp(-0.02 * n * dt), rel=1e-6)
+        assert h[0] == pytest.approx(h0[0] * (1 - 0.02 * dt) ** n, rel=1e-12)
         np.testing.assert_array_equal(h[1:], h0[1:])
+        if n == 50:
+            # informational: the spec's first-order update is about 1 % off exp(-c t) at 50 s
+            assert h[0] == pytest.approx(h0[0] * np.exp(-0.02 * n * dt), rel=0.012)
     # friction torque bleeds wheel 1 momentum into the body: tau_w = A (c o h) on average
     inertia_b = inertia(view)
     s = AttitudeState(np.array([1.0, 0, 0, 0]), np.zeros(3), h0.copy())

@@ -7,11 +7,10 @@ of A, 3 x 4). Each step dt:
     h_k(t + dt) = h_k(t) - (k_k u_k + c_k h_k) dt
     tau_w = A (k o u + c o h)
 
-The momentum update integrates dh_k/dt = -(k_k u_k + c_k h_k) exactly over the step with u held
-(zero-order hold), so friction decays h as exp(-c t) at any step size. The spec's form is the
-first-order expansion of the same ODE. A wheel at |h_k| = h_max saturates: h_k is held at h_max
+The momentum update is the spec's discrete form exactly as written, evaluated with h(t): under
+friction alone h_n = h_0 (1 - c dt)^n. A wheel at |h_k| = h_max saturates: h_k is held at h_max
 and the delivered torque is cut to match. The torque on the body over a step is
--A (h(t + dt) - h(t)) / dt, which equals A (k o u + c o h) averaged over the step.
+-A (h(t + dt) - h(t)) / dt, which equals the spec's A (k o u + c o h(t)) when no wheel saturates.
 """
 
 from __future__ import annotations
@@ -61,12 +60,8 @@ class WheelArray:
         return u
 
     def advance(self, h: F64, u: F64, dt: float) -> F64:
-        """Wheel momentum after dt: exact solution of dh/dt = -(k u + c h), then saturation."""
-        c = self.c
-        decay = np.exp(-c * dt)
-        # (1 - exp(-c dt)) / c, which tends to dt as c -> 0
-        gain = np.where(c > 0, -np.expm1(-c * dt) / np.where(c > 0, c, 1.0), dt)
-        h_new = h * decay - self.k * u * gain
+        """Spec: h_k(t + dt) = h_k(t) - (k_k u_k + c_k h_k(t)) dt, then saturation at h_max."""
+        h_new = h - (self.k * u + self.c * h) * dt
         out: F64 = np.clip(h_new, -self.h_max, self.h_max)
         return out
 
