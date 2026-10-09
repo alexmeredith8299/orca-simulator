@@ -206,13 +206,13 @@ class Wheels(_Model):
     tau_max_Nm: float
     h_max_Nms: float
     power_while_torquing_W: float
-    k_nominal: list[float]
-    c_nominal_per_s: list[float]
+    k: list[float]  # torque constant, dimensionless
+    c: list[float]  # bearing friction, 1/s
 
     @model_validator(mode="after")
     def _count(self) -> Self:
-        if not len(self.k_nominal) == len(self.c_nominal_per_s) == self.count:
-            raise ValueError("wheel arrays do not match wheels.count")
+        if not len(self.k) == len(self.c) == self.count:
+            raise ValueError("wheels.k and wheels.c lengths must equal wheels.count")
         return self
 
 
@@ -283,6 +283,7 @@ class Heater(_Model):
 class Eps(_Model):
     strings: int
     string_area_m2: float
+    string_health: list[Annotated[float, Field(ge=0, le=1)]]
     packing: float
     eta0: float
     T0_K: float
@@ -302,6 +303,12 @@ class Eps(_Model):
     battery_heater: Heater
     payload_heater: Heater
     heater_cutoff_true_K: float
+
+    @model_validator(mode="after")
+    def _strings(self) -> Self:
+        if len(self.string_health) != self.strings:
+            raise ValueError("eps.string_health length must equal eps.strings")
+        return self
 
 
 class Load(_Model):
@@ -562,7 +569,7 @@ _SEGMENT = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)((?:\[\d+\])*)")
 class ParamView:
     """Read-only, per-vehicle view over Params that model code reads every number through.
 
-    Paths are the dotted paths used in faults.yaml, e.g. `eps.R_pack_ohm`, `wheels.k_nominal[1]`,
+    Paths are the dotted paths used in faults.yaml, e.g. `eps.R_pack_ohm`, `wheels.k[1]`,
     `thermal.nodes.bus_px.alpha`, `cdh_upsets.lambda_in_per_s`. They resolve against the
     vehicle's bus merged with links_saa_imager.yaml; `scenario.` paths resolve against
     scenario.yaml. `overrides` maps a path to a replacement value; the fault injector fills it

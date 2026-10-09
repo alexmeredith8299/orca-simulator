@@ -12,6 +12,7 @@ star_tracker: {noise_cross_arcsec: 3, noise_roll_arcsec: 25}
 eps:
   strings: 3
   string_area_m2: 0.60
+  string_health: [1, 1, 1]
   eta0: 0.28
   battery: 8s5p Li-ion     # SAT-5 carries Bus A's cell lot
   E_cap_J: 4.32e6

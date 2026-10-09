@@ -12,14 +12,15 @@ wheels:
   tau_max_Nm: 0.1
   h_max_Nms: 4
   power_while_torquing_W: 10
-  k_nominal: [1, 1, 1, 1]
-  c_nominal_per_s: [0, 0, 0, 0]
+  k: [1, 1, 1, 1]          # torque constant, dimensionless (spec Model: actuators)
+  c: [0, 0, 0, 0]          # bearing friction, 1/s (spec Model: actuators)
 star_tracker: {face: "-y", tilt_below_level_deg: 8, sun_exclusion_deg: 30, earth_exclusion_deg: 25, noise_cross_arcsec: 2, noise_roll_arcsec: 20}
 imager: {pixels: 4096, fov_deg: 2, face: "-z"}
 crosslink: {band: S, range_km: 1500, rate_Mbit_s: 1}
 eps:
   strings: 4
   string_area_m2: 0.40
+  string_health: [1, 1, 1, 1]   # o_k, 1 = healthy string (spec Model: electrical power)
   packing: 0.85
   eta0: 0.29
   T0_K: 298.15

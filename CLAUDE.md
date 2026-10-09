@@ -38,7 +38,7 @@ pytest
   states. Field names carry their unit suffix (`_km`, `_J`, `_W_K`, `_per_s`).
 - **Quaternions:** scalar first `[w, x, y, z]`, rotating body to inertial.
 - **No numeric literals in model code.** Every number comes from `params/` through `ParamView`
-  (`view.get("eps.R_pack_ohm")`, `view.array("wheels.k_nominal")`). `ParamView.overrides`, keyed by
+  (`view.get("eps.R_pack_ohm")`, `view.array("wheels.k")`). `ParamView.overrides`, keyed by
   the dotted paths in `faults.yaml`, is how faults change parameters, so code that reads
   `Params` directly cannot see faults. Structural constants such as 0, 1 and array indices are
   fine; physical or tuning values are not.
@@ -69,7 +69,4 @@ pytest
 
 - PyYAML follows YAML 1.1, which reads `3.6e6` as a string. `params.py` registers a YAML 1.2 float
   resolver, so keep using `load_params`.
-- `faults.yaml` F2, F3 and F4 target `eps.string_health[0]`, `wheels.c[0]` and `wheels.k[1]`, which
-  the bus files do not define under those names (they have `k_nominal` and `c_nominal_per_s`).
-  M7 resolves this. Until then `tests/faults/test_fault_paths.py` marks them as strict xfail.
 - The distribution of the station-keeping burn length is not specified; see `scenario.yaml`.

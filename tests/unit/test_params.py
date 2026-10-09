@@ -132,8 +132,8 @@ def test_paramview_overrides(params: Params) -> None:
     assert ParamView(params, "SAT-1").get("eps.R_pack_ohm") == 0.08
     assert params.buses["A"].eps.R_pack_ohm == 0.08
 
-    v.overrides["wheels.k_nominal[1]"] = 0.5
-    k = v.array("wheels.k_nominal")
+    v.overrides["wheels.k[1]"] = 0.5
+    k = v.array("wheels.k")
     assert k.tolist() == [1, 0.5, 1, 1]
     with pytest.raises(ValueError, match="read-only"):
         k[0] = 2.0
@@ -142,3 +142,14 @@ def test_paramview_overrides(params: Params) -> None:
 def test_params_are_frozen(params: Params) -> None:
     with pytest.raises(ValueError, match="frozen"):
         params.buses["A"].eps.R_pack_ohm = 1.0  # type: ignore[misc]
+
+
+@pytest.mark.parametrize("sat", ["SAT-1", "SAT-5"])
+def test_fault_target_nominals(params: Params, sat: str) -> None:
+    v = ParamView(params, sat)
+    n_strings = int(v.get("eps.strings"))
+    n_wheels = int(v.get("wheels.count"))
+    assert v.array("eps.string_health").tolist() == [1] * n_strings
+    assert v.array("wheels.k").tolist() == [1] * n_wheels
+    assert v.array("wheels.c").tolist() == [0] * n_wheels
+    assert (n_strings, n_wheels) == ((4, 4) if sat == "SAT-1" else (3, 4))
