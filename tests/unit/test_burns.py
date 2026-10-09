@@ -62,7 +62,7 @@ def test_command_during_a_pass_uses_that_pass() -> None:
 
 def test_suspension_extends_the_burn() -> None:
     rec = BurnRecord("SAT-4", command_time_s=0.0, length_s=900.0, accel_m_s2=1e-3)
-    window = (130 * TICK, 135 * TICK)
+    window = (20 * TICK, 25 * TICK)  # inside the burn, which starts at tick 10
     ctrl = BurnController(rec, TICK, STEP, suspend=[window])
     active = drive(ctrl, set(range(5, 10)), 400)
     assert rec.burn_start_s == 10 * TICK

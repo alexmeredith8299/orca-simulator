@@ -42,7 +42,8 @@ def sample(draw: Draw, gen: np.random.Generator) -> float:
 
 @dataclass(frozen=True)
 class SeedDraws:
-    """The per-seed scenario draws used so far (M1). Later milestones add fields."""
+    """The per-seed scenario draws. Spec: Parameters > Scenario and environment (epoch, run
+    length, drag rho_0 and H, burn command time per burn vehicle, burn length)."""
 
     seed: int
     epoch_utc: datetime
@@ -71,6 +72,12 @@ def draw_seed(params: Params, seed: int) -> SeedDraws:
         run_length_s=sample(s.run_length_h, rng(seed, "draw.run_length")) * S_PER_HOUR,
         rho0_kg_m3=sample(s.drag.rho0_kg_m3, rng(seed, "draw.rho0")),
         H_km=sample(s.drag.H_km, rng(seed, "draw.H")),
+        burn_command_s={
+            sat: sample(s.burn_command_time_h, rng(seed, f"draw.burn_command.{sat}")) * S_PER_HOUR
+            for sat in s.burn_vehicles
+        },
+        burn_length_s=sample(s.station_keeping_burn_length_draw_h, rng(seed, "draw.burn_length"))
+        * S_PER_HOUR,
     )
 
 

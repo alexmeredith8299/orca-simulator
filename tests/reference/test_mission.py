@@ -156,7 +156,12 @@ def test_burn_take_conflict(params: Params, mission72: MissionRun) -> None:
     assert rec.burn_start_s is not None
     assert rec.burn_start_s < t_take
     assert rec.suspended, "constructed case must overlap the take"
-    assert run.takes["SAT-2"].t_take_s == t_take
+    take = run.takes["SAT-2"]
+    # the burn shifts the orbit, so the take may move by a tick; the window must cover it
+    assert abs(take.t_take_s - t_take) <= 2 * params.scenario.control_tick_s
+    (w0, w1), = rec.suspended
+    assert w0 <= take.slew_in_start_s
+    assert w1 >= take.slew_out_end_s
     assert rec.flown_s == pytest.approx(rec.length_s)
     assert rec.dv_m_s == pytest.approx(1.0, rel=1e-9)
     gap = sum(b - a for a, b in rec.suspended)
