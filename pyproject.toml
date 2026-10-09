@@ -51,7 +51,7 @@ strict = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["ppigrf", "ppigrf.*", "scipy", "scipy.*", "astropy", "astropy.*"]
+module = ["ppigrf", "ppigrf.*", "scipy", "scipy.*", "astropy", "astropy.*", "erfa", "erfa.*"]
 ignore_missing_imports = true
 
 [tool.pydantic-mypy]

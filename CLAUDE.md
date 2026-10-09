@@ -27,8 +27,16 @@ pytest
 
 - `params/`: scenario, bus_a, bus_b (diff onto bus_a), faults, links_saa_imager.
 - `src/expand3/params.py`: pydantic models, `load_params(dir)`, `Params.bus(sat_id)` and `ParamView`.
-- `src/expand3/{env,vehicle,mission}/` plus `timebase.py`, `faults.py`, `sensors.py`, `links.py`,
-  `recorder.py` and `run.py`.
+- `src/expand3/timebase.py`: `rng(seed, name)` named substreams, `draw_seed` gives `SeedDraws`,
+  and `Clock`.
+- `src/expand3/env/`: `frames` (GCRS to ITRS, pole, mean Sun), `sun`, `eclipse`, `atmosphere` and
+  `ground`.
+- `src/expand3/vehicle/orbit.py`: force model, RK4, element conversions and initial states.
+- `src/expand3/constellation.py`: `propagate_constellation` gives r and v at ticks, plus the Sun,
+  the shadow fraction and station visibility.
+- `src/expand3/units.py`: definitional unit conversions only.
+- Stubs for later milestones: `mission/`, `faults.py`, `sensors.py`, `links.py`, `recorder.py` and
+  `run.py`.
 - `tests/unit`, `tests/invariants` (conservation and bounds), `tests/reference` (external
   references such as IGRF), `tests/faults` and `tests/regression` (seeded golden runs).
 
@@ -66,6 +74,31 @@ pytest
 | M8 | Batch runs and Parquet output |
 
 ## Known gaps
+
+M1 choices where the spec is silent (the default is in force until Alex says otherwise):
+
+- **Constants not in the spec.** `scenario.yaml` constants add omega_E = 7.2921159e-5 rad/s (IERS
+  2010) and R_sun = 695700 km (IAU 2015 B3, used by the dual-cone shadow).
+- **Frames.** ECI is GCRS and ECEF is ITRS (ERFA `c2t06a`, the same transform as astropy's
+  GCRS to ITRS). IERS data is used offline from the bundled tables, never downloaded. Future
+  epochs use astropy's predicted UT1 and polar motion, a sub-second UT1 error.
+- **J2 and Earth rotation** act about Earth's pole (ITRS +z in ECI at the epoch), held fixed for
+  the run. This pole differs from GCRS z by about 0.15 deg of precession.
+- **LTAN** is mean local time: RAAN = RA of the mean Sun + (LTAN - 12 h) x 15 deg/h, with the mean
+  Sun's Greenwich hour angle (UT1 - 12 h) x 15 deg/h. RAAN and inclination are measured in Earth's
+  equator at the epoch.
+- **Sun** is the geocentric apparent position (astropy `get_body`). The shadow fraction uses a
+  spherical Earth, flat-disk overlap and no atmosphere.
+- **Stations** sit on WGS84 at zero height. Elevation is geometric (no refraction) from the
+  geodetic horizontal. Altitude for drag is the spherical |r| - R_E, as the spec states.
+- **Mass** is the wet mass in M1. Propellant drain arrives with the thruster in M3.
+- **Two-body energy tolerance.** RK4 at the spec's 10 s step drifts about 1.3e-9 in energy over
+  72 h (truncation, scaling as dt^5). The invariant test uses 2e-9 for energy and 1e-9 for angular
+  momentum, and also checks the step scaling.
+- **Run length and ticks.** A run length that is not a multiple of the 30 s tick ends at the last
+  whole tick.
+- **Products at ticks.** States, frames, Sun and shadow are produced at control ticks only, so
+  there is no 10 s interpolation yet. Revisit if M2 or M3 need substep environment values.
 
 - PyYAML follows YAML 1.1, which reads `3.6e6` as a string. `params.py` registers a YAML 1.2 float
   resolver, so keep using `load_params`.
