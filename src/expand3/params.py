@@ -161,6 +161,8 @@ class Scenario(_Model):
     station_keeping_burn_length_draw_h: Draw
     station_keeping_dv_m_s: float
     take_duration_s: float
+    eps_initial_soc: float = Field(ge=0, le=1)
+    placeholder_node_temperature_K: dict[str, float]
     slew: Slew
     take_window_start_h: float
     take_constraints: TakeConstraints

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from numpy.typing import NDArray
@@ -43,6 +43,7 @@ from expand3.mission.takes import (
 from expand3.params import Params, ParamView
 from expand3.timebase import Clock, SeedDraws, draw_seed
 from expand3.vehicle.attitude import quat_conj, quat_mul, quat_rotate
+from expand3.vehicle.eps import EpsHistory
 from expand3.vehicle.orbit import Forces, OrbitModel, initial_states, rk4_step
 from expand3.vehicle.thruster import thrust_step
 
@@ -83,6 +84,7 @@ class MissionRun:
     takes: dict[str, TakeRecord]
     slews: dict[str, list[SlewResult]]
     wall_s: float
+    eps: dict[str, EpsHistory] = field(default_factory=dict)
 
 
 @dataclass

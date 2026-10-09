@@ -24,6 +24,9 @@ station_keeping_burn_length_h: {nominal: 6, note: "About 6 h; varies by seed (di
 station_keeping_burn_length_draw_h: {draw: uniform, low: 5, high: 7}   # default, spec silent ("about 6 h; varies by seed")
 station_keeping_dv_m_s: 1.0     # default, spec silent: delivered delta-v at nominal eta_F, prograde
 take_duration_s: 60             # default, spec silent
+eps_initial_soc: 0.8            # default, spec silent
+# Temporary node temperatures for EPS until the M5 thermal network supplies them (default, spec silent)
+placeholder_node_temperature_K: {wings: 298.15, battery: 293.15, payload: 293.15}
 # Slew defaults: not in spec (spec: "minimum-torque plan with a PD trim"). See CLAUDE.md Known gaps.
 slew:
   step_s: 1                  # attitude + wheel integration step inside the control tick
