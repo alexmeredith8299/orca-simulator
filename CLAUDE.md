@@ -32,10 +32,14 @@ pytest
 - `src/expand3/env/`: `frames` (GCRS to ITRS, pole, mean Sun), `sun`, `eclipse`, `atmosphere` and
   `ground`.
 - `src/expand3/vehicle/orbit.py`: force model, RK4, element conversions and initial states.
+- `src/expand3/vehicle/attitude.py` (quaternions, kinematics, rigid body) and
+  `vehicle/wheels.py` (`WheelArray`).
+- `src/expand3/mission/pointing.py` (Sun hold, burn and take laws) and `mission/slew.py` (plan
+  plus PD slews).
 - `src/expand3/constellation.py`: `propagate_constellation` gives r and v at ticks, plus the Sun,
   the shadow fraction and station visibility.
 - `src/expand3/units.py`: definitional unit conversions only.
-- Stubs for later milestones: `mission/`, `faults.py`, `sensors.py`, `links.py`, `recorder.py` and
+- Stubs for later milestones: `faults.py`, `sensors.py`, `links.py`, `recorder.py` and
   `run.py`.
 - `tests/unit`, `tests/invariants` (conservation and bounds), `tests/reference` (external
   references such as IGRF), `tests/faults` and `tests/regression` (seeded golden runs).
@@ -103,3 +107,35 @@ M1 choices where the spec is silent (the default is in force until Alex says oth
 - PyYAML follows YAML 1.1, which reads `3.6e6` as a string. `params.py` registers a YAML 1.2 float
   resolver, so keep using `load_params`.
 - The distribution of the station-keeping burn length is not specified; see `scenario.yaml`.
+
+M2 choices where the spec is silent:
+
+- **Wheel azimuths** are 45, 135, 225 and 315 deg about +z from +x (`wheels.azimuth_deg`). The
+  spec gives only the 54.7 deg cant.
+- **Wheel momentum update.** dh/dt = -(k u + c h) is integrated exactly over each step with u
+  held, so F3 friction decays as exp(-c t). The spec's discrete form is its first-order version.
+  Saturation clamps |h| at h_max, and the body torque is the matching -A dh/dt.
+- **Wheel power** is charged per wheel whenever |u_k| > 0, including a saturated wheel that is
+  still commanded.
+- **Rigid-body integration** uses the momentum form: inertial total momentum
+  H = R(q)(I omega + A h) is carried and omega = I^-1 (R^T H - A h). This is equivalent to the
+  spec's equation, and torque-free H is conserved to roundoff. The 1 s step is within 1e-5 rad of
+  a fine step over 30 s of slewing (fourth order).
+- **Gravity gradient** is implemented but off in slews, which the spec allows. It switches on
+  when `step` is given a position.
+- **Pointing roll conventions.** Idle puts body +x as close as possible to the orbit normal. A
+  burn rolls about the thrust axis to bring +z closest to the Sun (closed form via TRIAD). A take
+  uses the idle roll, because rolling about the -z boresight cannot change +z.
+- **Slew plan.** The plan is a bang-coast-bang eigen-axis rotation. Its acceleration uses
+  `slew.torque_fraction` = 0.8 of the unclipped torque the array delivers in the required
+  direction I e, rather than a minimum over body axes, so each slew uses its own axis capability.
+  The coast rate uses 0.8 of the wheel momentum capacity in that direction. Phases are rounded up
+  to whole 1 s steps, so the zero-order-hold feedforward is exact and the slew lands at the
+  planned end. That adds at most 3 steps over the continuous bang-coast-bang prediction. The
+  10 % duration check is applied to slews predicted at 20 s or more, and every slew must finish
+  within the prediction plus 3 steps.
+- **PD trim.** w_n = 0.3 rad/s and zeta = 0.9, so K_p = I w_n^2 and K_d = 2 zeta w_n I, with
+  gyroscopic feedforward. A slew is done when the error is below 0.1 deg and the rate below
+  1e-4 rad/s, and gives up 300 s after the planned end.
+- **Slew step** is 1 s (`slew.step_s`), inside the 30 s control tick.
+

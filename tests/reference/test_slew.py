@@ -33,7 +33,11 @@ def test_random_slews_converge(sat: str, q0: np.ndarray, q1: np.ndarray) -> None
     np.testing.assert_allclose(np.linalg.norm(res.q, axis=1), 1.0, atol=1e-12)
     assert np.all(np.abs(res.h) <= view.get("wheels.h_max_Nms") + 1e-12)
     assert np.all(np.abs(res.u) <= view.get("wheels.tau_max_Nm") + 1e-12)
-    if res.plan.angle_rad > np.deg2rad(10):
+    # Plan phases are rounded up to whole slew steps (at most 3 steps added), and the slew lands
+    # at the planned end. Below about 20 s that quantization alone exceeds 10%.
+    dt = view.get("scenario.slew.step_s")
+    assert res.plan.predicted_s - 1e-9 <= res.duration_s <= res.plan.predicted_s + 3 * dt
+    if res.plan.predicted_s >= 20 * dt:
         assert res.duration_s == pytest.approx(res.plan.predicted_s, rel=0.10)
 
 
