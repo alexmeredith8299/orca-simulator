@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from expand3.constellation import ConstellationRun, propagate_constellation
+from expand3.mission.thread import MissionRun, run_mission
 from expand3.params import Params, load_params
 from expand3.timebase import SeedDraws, draw_seed
 from expand3.units import S_PER_HOUR
@@ -26,3 +27,10 @@ def draws(params: Params) -> SeedDraws:
 def run72(params: Params, draws: SeedDraws) -> ConstellationRun:
     """All six vehicles, full force model, 72 h (the longest spec run)."""
     return propagate_constellation(params, draws, duration_s=LONG_RUN_H * S_PER_HOUR)
+
+
+@pytest.fixture(scope="session")
+def mission72(params: Params) -> MissionRun:
+    """Full mission thread, all six vehicles, 72 h."""
+
+    return run_mission(params, TEST_SEED, duration_s=LONG_RUN_H * S_PER_HOUR)

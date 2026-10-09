@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 import numpy as np
@@ -49,6 +49,8 @@ class SeedDraws:
     run_length_s: float
     rho0_kg_m3: float
     H_km: float
+    burn_command_s: dict[str, float] = field(default_factory=dict)
+    burn_length_s: float = 0.0
 
 
 def _draw_epoch(draw: Draw, gen: np.random.Generator) -> datetime:
