@@ -1,0 +1,39 @@
+# Scenario and environment. Source: EXPAND.3 Phase I spec, Parameters > Scenario and environment.
+orbit:
+  a_km: 6903.137            # 525 km altitude
+  e: 0.0001
+  i_deg: 97.497
+  ltan_hours: 22.5          # LTAN 22:30 (descending node 10:30)
+  arg_perigee_deg: 0.0
+true_anomaly_at_epoch_deg: {SAT-1: 0, SAT-2: 2, SAT-3: 4, SAT-4: 180, SAT-5: 182, SAT-6: 184}
+bus_of: {SAT-1: A, SAT-2: A, SAT-3: A, SAT-4: A, SAT-5: B, SAT-6: B}
+clusters: [[SAT-1, SAT-2, SAT-3], [SAT-4, SAT-5, SAT-6]]
+burn_vehicles: [SAT-2, SAT-3, SAT-4]
+take_vehicles: [SAT-2, SAT-3, SAT-4]
+epoch: {draw: uniform, year: 2027}
+run_length_h: {draw: uniform, low: 48, high: 72}
+integration_step_s: 10
+control_tick_s: 30
+ground_stations:
+  - {name: Svalbard, lat_deg: 78.23, lon_deg: 15.41}
+  - {name: Fairbanks, lat_deg: 64.86, lon_deg: -147.85}
+  - {name: Wallops, lat_deg: 37.94, lon_deg: -75.46}
+elevation_mask_deg: 5
+burn_command_time_h: {draw: uniform, low: 12, high: 36, per: burn_vehicle}
+station_keeping_burn_length_h: {nominal: 6, note: "About 6 h; varies by seed (distribution not specified, see spec gap)"}
+take_window_start_h: 30     # first point after 30 h where take constraints hold
+take_constraints: {max_off_nadir_deg: 45, min_sun_elevation_at_target_deg: 10}
+fault_lead_s: {draw: uniform, low: 5700, high: 11400}
+constants:
+  mu_km3_s2: 398600.4418
+  J2: 1.08262668e-3
+  R_E_km: 6378.137
+  S_W_m2: 1361
+  a_alb: 0.30
+  q_IR_W_m2: 237
+  sigma_W_m2_K4: 5.670374e-8
+  g0_m_s2: 9.80665
+drag:
+  h0_km: 525
+  rho0_kg_m3: {draw: loguniform, low: 1.0e-13, high: 1.0e-12}
+  H_km: {draw: uniform, low: 60, high: 70}
