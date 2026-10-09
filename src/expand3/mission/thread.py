@@ -45,6 +45,7 @@ from expand3.timebase import Clock, SeedDraws, draw_seed
 from expand3.vehicle.attitude import quat_conj, quat_mul, quat_rotate, quat_to_dcm
 from expand3.vehicle.eps import Eps, EpsHistory, EpsInputs, history, placeholder_temperatures
 from expand3.vehicle.orbit import Forces, OrbitModel, initial_states, rk4_step
+from expand3.vehicle.thermal import ThermalHistory
 from expand3.vehicle.thruster import thrust_step
 
 F64 = NDArray[np.float64]
@@ -85,6 +86,7 @@ class MissionRun:
     slews: dict[str, list[SlewResult]]
     wall_s: float
     eps: dict[str, EpsHistory] = field(default_factory=dict)
+    thermal: dict[str, ThermalHistory] = field(default_factory=dict)
 
 
 @dataclass
