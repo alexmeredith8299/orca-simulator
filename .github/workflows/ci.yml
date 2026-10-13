@@ -24,3 +24,7 @@ jobs:
         run: mypy src
       - name: Pytest
         run: pytest
+      - name: Short batch and report
+        run: |
+          expand3 run --seeds 0:3 --out ci_batch --duration-h 2 --workers 2
+          expand3 report ci_batch

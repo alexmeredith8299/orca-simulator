@@ -164,7 +164,7 @@ def test_labels_none(batch: Path) -> None:
 @pytest.mark.slow
 def test_forced_fault_labels(tmp_path: Path, params: Params) -> None:
     run_seed(PARAMS_DIR, 20270, tmp_path, FaultConfig(mode="forced", fault_id="F9",
-                                                      lead_s=10_000.0), duration_h=29.0)
+                                                      lead_s=10_000.0), duration_h=31.0)
     d = seed_dir(tmp_path, 20270)
     lab = json.loads((d / "labels.json").read_text())
     assert (lab["fault_id"], lab["vehicle"], lab["lead_s"]) == ("F9", "SAT-2", 10_000.0)

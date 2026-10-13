@@ -23,6 +23,13 @@ mypy src
 pytest
 ```
 
+Batch runs and the validation report:
+
+```bash
+expand3 run --seeds 0:100 --out /path/outside/repo --workers 8
+expand3 report /path/outside/repo
+```
+
 ## Layout
 
 - `params/`: scenario, bus_a, bus_b (diff onto bus_a), faults, links_saa_imager.
@@ -54,7 +61,8 @@ pytest
 - `src/expand3/constellation.py`: `propagate_constellation` gives r and v at ticks, plus the Sun,
   the shadow fraction and station visibility.
 - `src/expand3/units.py`: definitional unit conversions only.
-- Stubs for later milestones: `recorder.py` and `run.py`.
+- `src/expand3/recorder.py` (Parquet and labels per run), `run.py` (`run_seed`, `run_batch`,
+  manifests), `report.py` (validation report) and `cli.py` (`expand3 run`, `expand3 report`).
 - `tests/unit`, `tests/invariants` (conservation and bounds), `tests/reference` (external
   references such as IGRF), `tests/faults` and `tests/regression` (seeded golden runs).
 
@@ -319,3 +327,31 @@ M7 choices where the spec is silent:
 - **Isolation.** Other vehicles are bit-identical to the no-fault run. The only differences are
   crosslink messages the faulted vehicle sends (they carry its changed state, under F5/F6) and
   drops on its links (F8).
+
+M8 choices where the spec is silent:
+
+- **Output layout.** One directory per seed (`seed_NNNNN`) in long format, with `sat_id` and
+  `t_s` on every row and rows ordered by vehicle, then time. Units are in the column-name suffix
+  and in each file's `units` schema metadata. The files are:
+  - `truth.parquet`: per tick.
+  - `measurements.parquet`: every Signals-table signal on the tick grid as `_meas` beside
+    `_true`, NaN where it is not sampled or not available, with `gnss_valid`, `st_available` and
+    `tank_valid`.
+  - `wheel_steps.parquet`: per 1 s slew step.
+  - `burns.parquet`: per tick while burning.
+  - `burn_summary.parquet`, `takes.parquet` and `crosslink.parquet`: per message.
+  - `labels.json` and `manifest.json`.
+- **Fault columns.** `fault_s` is 0 and `fault_theta_0` / `fault_theta_1` are NaN on vehicles
+  without the fault and in no-fault runs. `labels.json` names which path each theta column holds.
+- **Determinism.** The data files carry no timing or host information and are byte-identical
+  across runs and worker counts. The manifests carry provenance (git commit and dirty flag,
+  params hash, versions, file SHA-256) and timing.
+- **Batch mechanics.** A seed is complete when its manifest exists. Seeds are written to a
+  temporary directory and renamed into place. Worker processes use spawn, not fork. A failing
+  seed is recorded with its traceback in the batch manifest, and the CLI exits 1 while the other
+  seeds still complete.
+- **Short runs.** `--duration-h` overrides the drawn run length, for tests and CI. A fault whose
+  vehicle has no take inside a short run is not armed, and its label is "none".
+- **Report signatures.** These are measured on the faulted vehicle alone, after arm. A paired
+  delta is added when `--baseline` points at a no-fault batch of the same seeds.
+
