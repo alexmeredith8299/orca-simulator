@@ -30,6 +30,7 @@ from expand3.env.eclipse import shadow_fraction
 from expand3.env.frames import eci_to_ecef
 from expand3.env.ground import Station, elevation_deg, stations
 from expand3.env.sun import sun_eci
+from expand3.faults import FaultConfig, FaultLabel
 from expand3.links import CrosslinkLog, crosslink
 from expand3.mission import pointing
 from expand3.mission.burns import BurnController, BurnRecord, plan_burns
@@ -114,6 +115,7 @@ class MissionRun:
     saa: dict[str, SaaHistory] = field(default_factory=dict)
     signals: dict[str, VehicleSignals] = field(default_factory=dict)
     crosslink: CrosslinkLog | None = None
+    fault: FaultLabel | None = None
 
 
 @dataclass
@@ -166,6 +168,7 @@ def run_mission(
     duration_s: float | None = None,
     draws: SeedDraws | None = None,
     overrides: dict[str, dict[str, float]] | None = None,
+    fault: FaultConfig | None = None,
 ) -> MissionRun:
     """Propagate all six vehicles end to end with the mission thread.
 
