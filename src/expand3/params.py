@@ -9,7 +9,7 @@ from __future__ import annotations
 import copy
 import itertools
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Annotated, Any, Literal, Self
 
@@ -595,14 +595,20 @@ class ParamView:
     Paths are the dotted paths used in faults.yaml, e.g. `eps.R_pack_ohm`, `wheels.k[1]`,
     `thermal.nodes.bus_px.alpha`, `cdh_upsets.lambda_in_per_s`. They resolve against the
     vehicle's bus merged with links_saa_imager.yaml; `scenario.` paths resolve against
-    scenario.yaml. `overrides` maps a path to a replacement value; the fault injector fills it
-    in M7. Overrides win over the loaded value.
+    scenario.yaml.
+
+    `overrides` maps a path to a fixed replacement value (tests, paired studies). `schedule` maps
+    a path to a function of time; the fault injector (M7) fills it. A scheduled path is read at
+    the view's current time, set with `at(t)`; reading one before any time is set is an error,
+    so no caller can silently see the nominal value. Precedence: overrides, schedule, loaded.
     """
 
     def __init__(self, params: Params, sat_id: SatId) -> None:
         self._params = params
         self._sat_id = sat_id
         self.overrides: dict[str, float] = {}
+        self.schedule: dict[str, Callable[[float], float]] = {}
+        self.t: float | None = None
         tree = deep_merge(params.links.model_dump(), params.bus(sat_id).model_dump())
         tree["scenario"] = params.scenario.model_dump()
         self._tree: dict[str, Any] = tree
@@ -627,8 +633,33 @@ class ParamView:
                 node = node[int(idx)]
         return node
 
+    def at(self, t_s: float) -> ParamView:
+        """Set the time that scheduled paths are read at; returns the view for chaining."""
+        self.t = float(t_s)
+        return self
+
+    def base(self, path: str) -> float:
+        """The loaded value of a scalar path, ignoring overrides and schedules."""
+        value = self._lookup(path)
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            raise TypeError(f"{path!r} is not a scalar number")
+        return float(value)
+
+    def _scheduled(self, path: str) -> float:
+        if self.t is None:
+            raise RuntimeError(f"{path!r} is scheduled; set the time with at(t) first")
+        return float(self.schedule[path](self.t))
+
+    def get_series(self, path: str, t_s: NDArray[np.float64]) -> NDArray[np.float64]:
+        """The value of a scalar path at each time in t_s (the view's time is restored)."""
+        saved = self.t
+        try:
+            return np.array([self.at(float(t)).get(path) for t in t_s], dtype=np.float64)
+        finally:
+            self.t = saved
+
     def has(self, path: str) -> bool:
-        if path in self.overrides:
+        if path in self.overrides or path in self.schedule:
             return True
         try:
             self._lookup(path)
@@ -639,10 +670,9 @@ class ParamView:
     def get(self, path: str) -> float:
         if path in self.overrides:
             return self.overrides[path]
-        value = self._lookup(path)
-        if isinstance(value, bool) or not isinstance(value, int | float):
-            raise TypeError(f"{path!r} is not a scalar number")
-        return float(value)
+        if path in self.schedule:
+            return self._scheduled(path)
+        return self.base(path)
 
     def array(self, path: str) -> NDArray[np.float64]:
         """A numeric list as a float array, with element overrides (`path[i]`) applied."""
@@ -651,5 +681,7 @@ class ParamView:
             key = f"{path}[{i}]"
             if key in self.overrides:
                 out[i] = self.overrides[key]
+            elif key in self.schedule:
+                out[i] = self._scheduled(key)
         out.flags.writeable = False
         return out

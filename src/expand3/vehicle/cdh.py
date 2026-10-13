@@ -69,11 +69,13 @@ def edge_computer_off(t_s: F64, in_saa: B, reboot_s: float) -> B:
 
 
 def upsets(
-    rng: np.random.Generator, view: ParamView, in_saa: B, dt: float
+    rng: np.random.Generator, view: ParamView, in_saa: B, dt: float, t_s: F64 | None = None
 ) -> tuple[I64, I64]:
-    """Spec: C&DH upsets (F9). Poisson counts per tick and the resets among them."""
+    """Spec: C&DH upsets (F9). Poisson counts per tick and the resets among them; lambda_in is
+    read at each tick time (t_s, default every dt from 0)."""
     lam_out = view.get("cdh_upsets.lambda_out_per_s")
-    lam_in = np.array([view.get("cdh_upsets.lambda_in_per_s") for _ in range(len(in_saa))])
+    times = np.asarray(np.arange(len(in_saa)) * dt if t_s is None else t_s, dtype=np.float64)
+    lam_in = view.get_series("cdh_upsets.lambda_in_per_s", times)
     lam = lam_out + lam_in * np.asarray(in_saa, dtype=np.float64)
     counts = rng.poisson(lam * dt).astype(np.int64)
     resets = rng.binomial(counts, view.get("cdh_upsets.reset_fraction")).astype(np.int64)
@@ -87,6 +89,6 @@ def saa_history(
     b = field_magnitude_nt(r_ecef_km, epoch_utc)
     in_saa = b < view.get("saa.boundary_nT")
     dt = float(t_s[1] - t_s[0]) if len(t_s) > 1 else view.get("scenario.control_tick_s")
-    counts, resets = upsets(rng(seed, f"upsets.{view.sat_id}"), view, in_saa, dt)
+    counts, resets = upsets(rng(seed, f"upsets.{view.sat_id}"), view, in_saa, dt, t_s)
     return SaaHistory(b, in_saa, edge_computer_off(t_s, in_saa, view.get("edge_computer_reboot_s")),
                       counts, resets)

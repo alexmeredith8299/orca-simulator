@@ -52,12 +52,11 @@ def test_schedule_through_paramview(params: Params) -> None:
     with pytest.raises(RuntimeError):
         view.get("thermal.nodes.bus_px.alpha")  # a scheduled path needs the time set
     assert view.get("eps.R_pack_ohm") == 0.08  # unscheduled paths need no time
-    assert view.at(49_990.0).get("thermal.nodes.bus_px.alpha") == 0.08
-    assert view.at(50_010.0).get("thermal.nodes.bus_px.alpha") == 0.08  # arms at 50 010 -> tick
-    assert view.at(50_010.0).get("thermal.nodes.bus_px.epsilon") == pytest.approx(0.03)
-    assert inj.t_arm_s == 50_010.0
-    assert view.at(50_040.0).get("thermal.nodes.bus_px.alpha") == pytest.approx(0.24)
-    assert view.at(50_040.0).get("thermal.nodes.bus_px.epsilon") == pytest.approx(0.09)
+    assert inj.t_arm_s == 50_010.0  # first tick at or after t0 = 50 000 s
+    assert view.at(49_980.0).get("thermal.nodes.bus_px.alpha") == 0.08
+    assert view.at(50_000.0).get("thermal.nodes.bus_px.alpha") == 0.08  # t0 is not a tick
+    assert view.at(50_010.0).get("thermal.nodes.bus_px.alpha") == pytest.approx(0.24)
+    assert view.at(50_010.0).get("thermal.nodes.bus_px.epsilon") == pytest.approx(0.09)
     f2 = Injector(params, "F2", t0_s=1000.0, lead_s=6000.0, tick_s=TICK)
     v2 = ParamView(params, "SAT-2")
     f2.install(v2)
@@ -78,7 +77,8 @@ def test_label(params: Params) -> None:
     assert lab.t_arm_s == 100_020.0
     assert lab.lead_s == 9000.0
     np.testing.assert_allclose(lab.theta["eps.R_pack_ohm"], 0.08 * (1 + 2 * lab.s))
-    assert lab.s[-1] == pytest.approx((t[-1] - 100_020.0) / 21600)
+    assert lab.s[t == 100_020.0 + 10_800.0][0] == pytest.approx(0.5)
+    assert lab.s[-1] == 1.0
 
 
 def test_draw_uniform_and_lead(params: Params) -> None:
