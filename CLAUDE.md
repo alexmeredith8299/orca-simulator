@@ -42,14 +42,16 @@ pytest
   latches, node heat) and the per-tick `EpsHistory`.
 - `src/expand3/vehicle/thermal.py`: `Network` (node equation, Euler step, stability limit),
   `Thermal` (topology from params) and `step_power_and_thermal` (the per-tick coupling).
+- `src/expand3/sensors.py` (GNSS, star tracker, IMU, EPS and thermistor noise, SoC estimate, tank
+  gauge, `VehicleSignals`), `links.py` (crosslink), `vehicle/cdh.py` (IGRF-14, SAA, edge
+  computer, upsets) and `vehicle/payload.py` (dark current).
 - `src/expand3/mission/thread.py`: `run_mission(params, seed)` runs all six vehicles end to end
   and returns per-tick truth: r, v, q, omega, wheel h, mass, gates, the burn log, the take
-  records, `eps[sat]` and `thermal[sat]`.
+  records, `eps[sat]`, `thermal[sat]`, `saa[sat]`, `signals[sat]` and `crosslink`.
 - `src/expand3/constellation.py`: `propagate_constellation` gives r and v at ticks, plus the Sun,
   the shadow fraction and station visibility.
 - `src/expand3/units.py`: definitional unit conversions only.
-- Stubs for later milestones: `faults.py`, `sensors.py`, `links.py`, `recorder.py` and
-  `run.py`.
+- Stubs for later milestones: `faults.py`, `recorder.py` and `run.py`.
 - `tests/unit`, `tests/invariants` (conservation and bounds), `tests/reference` (external
   references such as IGRF), `tests/faults` and `tests/regression` (seeded golden runs).
 
@@ -196,8 +198,8 @@ M4 choices where the spec is silent:
   heater thermostats use true node temperatures. The cold-charge inhibit takes a sensed battery
   temperature when given (M6 supplies the thermistor value) and otherwise uses the true one.
 - **Gates.** The take load applies to ticks with t_take <= t < t_end. Wheel torquing power is the
-  mean over the tick of the M2 slew power (10 or 8 W per torquing wheel). The edge computer's SAA
-  gate is off until M6.
+  mean over the tick of the M2 slew power (10 or 8 W per torquing wheel). The edge-computer load
+  follows the M6 SAA history, and the cold-charge inhibit reads the battery thermistor.
 - **Unmet demand and curtailment.** Unmet demand (N- minus P_sup) and curtailed array power
   (N+ minus P_acc) are recorded as truth; loads are not browned out except through the
   undervoltage reflex.
@@ -250,4 +252,40 @@ M5 choices where the spec is silent:
     which it does only in some burn attitudes. The F7 test asserts the measured signature.
 - **Heaters.** In a nominal settled-start run the battery stays at 285-294 K and the payload at
   276-291 K, so neither heater ever cycles.
+
+M6 choices where the spec is silent:
+
+- **Streams.** Each sensor of each vehicle has its own stream (`noise.<sensor>.<sat>`), plus
+  `upsets.<sat>`, `drop.crosslink.<sender>.<receiver>` and `noise.crosslink.<sender>.<receiver>`.
+  Every stream draws for every sample, used or not, so no stream ever shifts. Thermistor noise
+  is drawn up front, because EPS reads the sensed battery temperature during the run.
+- **Star tracker.**
+  - The boresight is the -y face direction tilted 8 deg toward -z, and the tracker x axis is
+    body +x.
+  - Errors are a small rotation in the tracker frame (cross sigma on x and y, roll sigma on the
+    boresight), applied on the body side.
+  - There is no fix within 30 deg of the Sun, within 25 deg of the Earth's limb, or on the Earth.
+  - In Sun hold a fix is available about 48-53 % of the time.
+- **SoC estimate.** E_est advances by V_meas I_meas dt from the true SoC plus N(0, 2 %). It is
+  re-referenced to OCV^-1(V_meas) when the estimate is below 0.1 or above 0.9 (OCV slope at least
+  8 V per unit SoC) and |I_meas| < 0.5 A (`signals.soc_estimate` thresholds). The estimate is
+  not clipped.
+- **Tank gauge and heaters.** The tank gauge is only produced at ticks with a burn active. Heater
+  "commanded" is the latch state and "delivered" is its load row drawing power, which differ
+  only while shed.
+- **Crosslink.**
+  - Line of sight means the segment clears a spherical Earth of radius R_E. Range uses the
+    sender's 1500 km.
+  - Under F8 a message drops with probability 1 - (1 - p_sender)(1 - p_receiver), so a
+    vehicle's margin loss affects what it sends and receives. p is read every tick.
+  - Partner-state age is inf before the first receipt.
+- **SAA.**
+  - |B| comes from ppigrf's geocentric IGRF-14 at the ECEF position, with the coefficients at the
+    run epoch for the whole run.
+  - The edge computer is off inside the SAA and until 60 s after the first tick outside (2
+    ticks).
+  - Upsets are Poisson(lambda dt) per tick, with lambda_in read every tick (F9), and resets are
+    Binomial(upsets, 0.05).
+  - Nominally about 7.7 % of the time is inside the SAA, with 8-19 upsets per vehicle in 72 h.
+- **Imager.** D uses the payload node temperature at take start; it is recorded with the take.
 

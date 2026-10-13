@@ -42,6 +42,8 @@ class TakeRecord:
     sun_elevation_deg: list[float] = field(default_factory=list)
     off_nadir_deg: list[float] = field(default_factory=list)
     boresight_error_rad: list[float] = field(default_factory=list)
+    payload_K: float = float("nan")
+    dark_current_e_s_px: float = float("nan")
 
 
 def subsatellite_point(r_ecef_km: F64) -> tuple[F64, F64, F64, F64]:

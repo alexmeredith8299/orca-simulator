@@ -1,1 +1,98 @@
-"""Crosslink and ground-link availability, drops and receive noise (M6)."""
+"""Intra-cluster crosslink: range, line of sight, drops, receive noise, partner-state age (M6).
+
+Spec: Model: sensors, crosslink, SAA, imager (Crosslink, F8); Parameters > Links. Inside each
+cluster, a member within crosslink range and in line of sight sends its state every control
+tick; the receiver gets r and v with Gaussian noise. Under F8 each message drops independently
+with probability p.
+
+Conventions (CLAUDE.md Known gaps): line of sight means the segment between the two vehicles
+clears a spherical Earth of radius R_E. Range uses the sender's crosslink range. p is read
+through ParamView every tick for both ends of a link; a message drops with probability
+1 - (1 - p_sender)(1 - p_receiver), so a vehicle's margin loss affects what it sends and what it
+receives. Draws come from `drop.crosslink.<sender>.<receiver>` and
+`noise.crosslink.<sender>.<receiver>` for every tick, sent or not, so the streams never shift.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+import numpy as np
+from numpy.typing import NDArray
+
+from expand3.params import Params, ParamView
+from expand3.timebase import rng
+from expand3.units import M_PER_KM
+
+F64 = NDArray[np.float64]
+B = NDArray[np.bool_]
+
+
+@dataclass
+class CrosslinkLog:
+    """Per tick and ordered pair (sender, receiver): sent, delivered and the received state (NaN
+    unless delivered); receipts per receiver per tick; age [s] of each partner's latest state at
+    each receiver (inf before the first receipt)."""
+
+    pairs: list[tuple[str, str]]
+    t_s: F64
+    sent: B
+    delivered: B
+    r_meas_km: F64
+    v_meas_km_s: F64
+    receipts: dict[str, NDArray[np.int64]] = field(default_factory=dict)
+    age_s: dict[tuple[str, str], F64] = field(default_factory=dict)
+
+
+def line_of_sight(r1_km: F64, r2_km: F64, R_E_km: float) -> B:
+    """True where the segment r1-r2 stays outside a sphere of radius R_E."""
+    r1 = np.asarray(r1_km, dtype=np.float64)
+    d = np.asarray(r2_km, dtype=np.float64) - r1
+    s = np.clip(-np.sum(r1 * d, axis=-1) / np.sum(d * d, axis=-1), 0.0, 1.0)
+    closest = r1 + s[..., None] * d
+    out: B = np.linalg.norm(closest, axis=-1) > R_E_km
+    return out
+
+
+def crosslink(
+    seed: int, params: Params, views: dict[str, ParamView], sats: list[str], t_s: F64,
+    r_km: F64, v_km_s: F64,
+) -> CrosslinkLog:
+    """Messages for every ordered pair in each cluster. r_km, v_km_s are (tick, vehicle, 3)."""
+    pairs = [(a, b) for cluster in params.scenario.clusters for a in cluster for b in cluster
+             if a != b and a in sats and b in sats]
+    n_t, n_p = len(t_s), len(pairs)
+    sent = np.zeros((n_t, n_p), dtype=bool)
+    delivered = np.zeros((n_t, n_p), dtype=bool)
+    r_meas = np.full((n_t, n_p, 3), np.nan)
+    v_meas = np.full((n_t, n_p, 3), np.nan)
+    r_e = views[sats[0]].get("scenario.constants.R_E_km")
+    p_of = {s: np.array([views[s].get("crosslink.drop_probability") for _ in range(n_t)])
+            for s in sats}
+    for j, (a, b) in enumerate(pairs):
+        ka, kb = sats.index(a), sats.index(b)
+        va = views[a]
+        dist = np.linalg.norm(r_km[:, ka] - r_km[:, kb], axis=-1)
+        sent[:, j] = (dist <= va.get("crosslink.range_km")) & line_of_sight(
+            r_km[:, ka], r_km[:, kb], r_e)
+        p = 1.0 - (1.0 - p_of[a]) * (1.0 - p_of[b])
+        drop = rng(seed, f"drop.crosslink.{a}.{b}").random(n_t) < p
+        delivered[:, j] = sent[:, j] & ~drop
+        noise = rng(seed, f"noise.crosslink.{a}.{b}")
+        dr = noise.normal(0.0, va.get("crosslink.rx_noise_pos_m") / M_PER_KM, (n_t, 3))
+        dv = noise.normal(0.0, va.get("crosslink.rx_noise_vel_m_s") / M_PER_KM, (n_t, 3))
+        ok = delivered[:, j]
+        r_meas[ok, j] = r_km[ok, ka] + dr[ok]
+        v_meas[ok, j] = v_km_s[ok, ka] + dv[ok]
+    receipts = {s: delivered[:, [j for j, p in enumerate(pairs) if p[1] == s]].sum(axis=1)
+                .astype(np.int64) for s in sats}
+    age: dict[tuple[str, str], F64] = {}
+    for j, (a, b) in enumerate(pairs):
+        out = np.full(n_t, np.inf)
+        last = -np.inf
+        for n in range(n_t):
+            if delivered[n, j]:
+                last = float(t_s[n])
+            out[n] = float(t_s[n]) - last
+        age[(b, a)] = out
+    return CrosslinkLog(pairs, np.asarray(t_s), sent, delivered, r_meas, v_meas, receipts, age)
