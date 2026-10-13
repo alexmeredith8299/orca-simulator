@@ -115,6 +115,8 @@ class EpsHistory:
     p_gen_W: F64
     loads_W: dict[str, F64]
     demand_W: F64
+    p_acc_W: F64
+    p_sup_W: F64
     p_pack_W: F64
     curtailed_W: F64
     unmet_W: F64
@@ -155,6 +157,8 @@ def history(t_s: F64, steps: list[EpsStep]) -> EpsHistory:
         p_gen_W=arr("p_gen_W"),
         loads_W={n: np.array([s.loads_W[n] for s in steps]) for n in steps[0].loads_W},
         demand_W=arr("demand_W"),
+        p_acc_W=arr("p_acc_W"),
+        p_sup_W=arr("p_sup_W"),
         p_pack_W=arr("p_pack_W"),
         curtailed_W=arr("curtailed_W"),
         unmet_W=arr("unmet_W"),
