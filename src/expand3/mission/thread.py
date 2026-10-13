@@ -30,6 +30,7 @@ from expand3.env.eclipse import shadow_fraction
 from expand3.env.frames import eci_to_ecef
 from expand3.env.ground import Station, elevation_deg, stations
 from expand3.env.sun import sun_eci
+from expand3.links import CrosslinkLog
 from expand3.mission import pointing
 from expand3.mission.burns import BurnController, BurnRecord, plan_burns
 from expand3.mission.slew import SlewResult, plan_slew, slew
@@ -41,8 +42,10 @@ from expand3.mission.takes import (
     sun_elevation_deg,
 )
 from expand3.params import Params, ParamView
+from expand3.sensors import VehicleSignals
 from expand3.timebase import Clock, SeedDraws, draw_seed
 from expand3.vehicle.attitude import quat_conj, quat_mul, quat_rotate
+from expand3.vehicle.cdh import SaaHistory
 from expand3.vehicle.eps import Eps, EpsHistory, EpsInputs, history
 from expand3.vehicle.orbit import Forces, OrbitModel, initial_states, rk4_step
 from expand3.vehicle.thermal import (
@@ -94,6 +97,9 @@ class MissionRun:
     wall_s: float
     eps: dict[str, EpsHistory] = field(default_factory=dict)
     thermal: dict[str, ThermalHistory] = field(default_factory=dict)
+    saa: dict[str, SaaHistory] = field(default_factory=dict)
+    signals: dict[str, VehicleSignals] = field(default_factory=dict)
+    crosslink: CrosslinkLog | None = None
 
 
 @dataclass

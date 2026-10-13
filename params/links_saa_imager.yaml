@@ -10,7 +10,7 @@ signals:
   imu: {rate_s: 30, sigma_rad_s: 5.0e-5}
   pack_voltage: {rate_s: 30, sigma_V: 0.04}
   pack_current: {rate_s: 30, bias_A: 0.05, sigma_A: 0.02}
-  soc_estimate: {rate_s: 30, initial_error_sigma: 0.02}
+  soc_estimate: {rate_s: 30, initial_error_sigma: 0.02, steep_soc_low: 0.1, steep_soc_high: 0.9, rest_current_A: 0.5}   # steep/rest thresholds: default, spec silent
   string_power: {rate_s: 30, rel_sigma: 0.01}
   node_temperature: {rate_s: 30, sigma_K: 0.5}
   tank_gauge: {rate_s: 30, sigma_kg: 0.1}
