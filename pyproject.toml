@@ -19,6 +19,9 @@ dependencies = [
     "ppigrf",
 ]
 
+[project.scripts]
+expand3 = "expand3.cli:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest",
@@ -61,5 +64,8 @@ warn_required_dynamic_aliases = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = ["-ra", "--strict-markers"]
-markers = ["slow: long propagations (72 h); run by default and in CI, skip with -m 'not slow'"]
+addopts = ["-ra", "--strict-markers", "-m", "not batch100"]
+markers = [
+    "slow: long propagations (72 h); run by default and in CI, skip with -m 'not slow'",
+    "batch100: the 100-seed batch; not run by default (pytest -m batch100)",
+]
