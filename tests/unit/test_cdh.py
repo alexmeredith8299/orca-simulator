@@ -27,7 +27,7 @@ def test_field_matches_ppigrf(lat: float, lon: float, inside: bool) -> None:
     be, bn, bu = ppigrf.igrf(lon, lat, 525.0, EPOCH.replace(tzinfo=None))
     ref = float(np.sqrt(be**2 + bn**2 + bu**2).ravel()[0])
     assert b == pytest.approx(ref, rel=1e-6)
-    assert (b < 22_000) is inside
+    assert bool(b < 22_000) is inside
 
 
 def test_edge_computer_timing() -> None:

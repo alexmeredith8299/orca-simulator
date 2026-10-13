@@ -30,7 +30,7 @@ from expand3.env.eclipse import shadow_fraction
 from expand3.env.frames import eci_to_ecef
 from expand3.env.ground import Station, elevation_deg, stations
 from expand3.env.sun import sun_eci
-from expand3.links import CrosslinkLog
+from expand3.links import CrosslinkLog, crosslink
 from expand3.mission import pointing
 from expand3.mission.burns import BurnController, BurnRecord, plan_burns
 from expand3.mission.slew import SlewResult, plan_slew, slew
@@ -42,12 +42,26 @@ from expand3.mission.takes import (
     sun_elevation_deg,
 )
 from expand3.params import Params, ParamView
-from expand3.sensors import VehicleSignals
-from expand3.timebase import Clock, SeedDraws, draw_seed
+from expand3.sensors import (
+    Sampled,
+    VehicleSignals,
+    every,
+    gnss,
+    imu,
+    pack_current,
+    pack_voltage,
+    soc_estimate,
+    star_tracker,
+    string_power,
+    tank_gauge,
+    thermistor_noise,
+)
+from expand3.timebase import Clock, SeedDraws, draw_seed, rng
 from expand3.vehicle.attitude import quat_conj, quat_mul, quat_rotate
-from expand3.vehicle.cdh import SaaHistory
-from expand3.vehicle.eps import Eps, EpsHistory, EpsInputs, history
+from expand3.vehicle.cdh import SaaHistory, saa_history
+from expand3.vehicle.eps import BATTERY_NODE, PAYLOAD_NODE, Eps, EpsHistory, EpsInputs, history
 from expand3.vehicle.orbit import Forces, OrbitModel, initial_states, rk4_step
+from expand3.vehicle.payload import dark_current_e_s_px
 from expand3.vehicle.thermal import (
     Thermal,
     ThermalHistory,
@@ -269,13 +283,34 @@ def run_mission(
         v0.get("scenario.constants.R_E_km"), v0.get("scenario.constants.R_sun_km"),
     )
     gate_pass = elev >= mask
+    r_ecef = np.einsum("nij,nkj->nki", rot, traj.r)
+    saa = {
+        sat: saa_history(draws.seed, views[sat], t, r_ecef[:, k], draws.epoch_utc)
+        for k, sat in enumerate(sats)
+    }
     eps: dict[str, EpsHistory] = {}
     thermal: dict[str, ThermalHistory] = {}
+    therm_noise: dict[str, F64] = {}
     for k, sat in enumerate(sats):
+        n_nodes = len(Thermal(views[sat]).names)
+        therm_noise[sat] = thermistor_noise(rng(draws.seed, f"noise.thermistor.{sat}"),
+                                            views[sat], len(t), n_nodes)
         eps[sat], thermal[sat] = _run_power_thermal(
             views[sat], k, t, tick, q, traj.r, shadow, sun_u, gate_pass, takes.get(sat),
-            slews.get(sat, []),
+            slews.get(sat, []), saa[sat].edge_off, therm_noise[sat],
         )
+    for sat, rec in takes.items():
+        n = int(np.flatnonzero(np.isclose(t, rec.t_take_s))[0])
+        rec.payload_K = float(thermal[sat].node(PAYLOAD_NODE)[n])
+        rec.dark_current_e_s_px = dark_current_e_s_px(views[sat], rec.payload_K)
+    signals = {
+        sat: _vehicle_signals(
+            draws.seed, views[sat], k, t, traj, q, omega, sun_u, gate_pass, gate_take,
+            gate_slew, eps[sat], thermal[sat], therm_noise[sat], saa[sat],
+        )
+        for k, sat in enumerate(sats)
+    }
+    link_log = crosslink(draws.seed, params, views, sats, t, traj.r, traj.v)
     return MissionRun(
         draws=draws,
         sats=sats,
@@ -305,6 +340,9 @@ def run_mission(
         wall_s=time.perf_counter() - start_wall,
         eps=eps,
         thermal=thermal,
+        saa=saa,
+        signals=signals,
+        crosslink=link_log,
     )
 
 
@@ -503,11 +541,14 @@ def _run_power_thermal(
     gate_pass: B,
     take: TakeRecord | None,
     slews: list[SlewResult],
+    edge_off: B,
+    therm_noise: F64,
 ) -> tuple[EpsHistory, ThermalHistory]:
     """Step one vehicle's EPS and thermal network over every tick (Spec: Model: electrical
     power; Model: thermal network). Each tick EPS runs with the node temperatures at the tick
     start, then the network steps with that tick's node heat. The take load applies to ticks
-    with t_take <= t < t_end. The SAA edge-computer gate is off until M6."""
+    with t_take <= t < t_end. The edge computer is off per the SAA history, and the cold-charge
+    inhibit reads the battery thermistor (true temperature plus its noise)."""
     eps = Eps(view)
     th = Thermal(view)
     state = eps.initial_state()
@@ -515,6 +556,7 @@ def _run_power_thermal(
     wheel_w = _wheel_power_per_tick(t, tick, take, slews, view.get("scenario.slew.step_s"))
     steps = []
     temps = np.empty((len(t), len(th.names)))
+    ib = th.names.index(BATTERY_NODE)
     for n in range(len(t)):
         temps[n] = T
         env = thermal_env(q[n, k], r[n, k], sun_u[n], float(shadow[n, k]))
@@ -528,8 +570,73 @@ def _run_power_thermal(
                 in_pass=bool(gate_pass[n, k].any()),
                 take=bool(in_take),
                 wheel_power_W=float(wheel_w[n]),
+                edge_off=bool(edge_off[n]),
+                sensed_battery_K=float(T[ib] + therm_noise[n, ib]),
             ),
             env, tick,
         )
         steps.append(step)
     return history(t, steps), ThermalHistory(t, list(th.names), temps)
+
+
+def _vehicle_signals(
+    seed: int,
+    view: ParamView,
+    k: int,
+    t: F64,
+    traj: _Trajectory,
+    q: F64,
+    omega: F64,
+    sun_u: F64,
+    gate_pass: B,
+    gate_take: B,
+    gate_slew: B,
+    eps: EpsHistory,
+    th: ThermalHistory,
+    therm_noise: F64,
+    saa: SaaHistory,
+) -> VehicleSignals:
+    """Every measured signal of one vehicle with its truth (Spec: Signals table), each sensor
+    drawing from `noise.<sensor>.<sat>`."""
+    sat = view.sat_id
+
+    def stream(name: str) -> np.random.Generator:
+        return rng(seed, f"noise.{name}.{sat}")
+
+    r, v = traj.r[:, k], traj.v[:, k]
+    pos, vel = gnss(stream("gnss"), view, t, r, v)
+    volts = pack_voltage(stream("voltage"), view, t, eps.v_V)
+    amps = pack_current(stream("current"), view, t, eps.i_A)
+    soc_meas = soc_estimate(stream("soc"), view, volts.t_s, volts.meas, amps.meas,
+                            float(eps.soc[0]))
+    burning = traj.burning[:, k]
+    return VehicleSignals(
+        gnss_r=pos,
+        gnss_v=vel,
+        star_tracker=star_tracker(stream("star_tracker"), view, t, q[:, k], r, sun_u),
+        imu=imu(stream("imu"), view, t, omega[:, k]),
+        pack_voltage=volts,
+        pack_current=amps,
+        string_power=string_power(stream("string_power"), view, t, eps.p_string_W),
+        node_temperature=Sampled(t, th.T_K + therm_noise, th.T_K),
+        node_names=list(th.names),
+        soc_estimate=Sampled(volts.t_s, soc_meas, eps.soc[every(t, view.get(
+            "signals.soc_estimate.rate_s"))]),
+        tank_gauge=tank_gauge(stream("tank"), view, t, traj.prop[:, k], burning),
+        burn_a_cmd_m_s2=traj.a_cmd[:, k],
+        burn_dv_m_s=traj.dv[:, k],
+        burn_propellant_used_kg=traj.prop[0, k] - traj.prop[:, k],
+        heater_commanded={"battery": eps.battery_heater, "payload": eps.payload_heater},
+        heater_delivered={"battery": eps.loads_W["battery_heater"] > 0,
+                          "payload": eps.loads_W["payload_heater"] > 0},
+        gates={
+            "pass": gate_pass[:, k].any(axis=1),
+            "take": gate_take[:, k],
+            "slew": gate_slew[:, k],
+            "burn": burning,
+            "saa": saa.in_saa,
+            "shed": eps.shed,
+            "uv_hold": eps.uv_hold,
+        },
+    )
+
