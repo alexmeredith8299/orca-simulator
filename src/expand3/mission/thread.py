@@ -30,6 +30,7 @@ from expand3.env.eclipse import shadow_fraction
 from expand3.env.frames import eci_to_ecef
 from expand3.env.ground import Station, elevation_deg, stations
 from expand3.env.sun import sun_eci
+from expand3.faults import FaultConfig, FaultLabel, Injector, draw_fault
 from expand3.links import CrosslinkLog, crosslink
 from expand3.mission import pointing
 from expand3.mission.burns import BurnController, BurnRecord, plan_burns
@@ -114,6 +115,7 @@ class MissionRun:
     saa: dict[str, SaaHistory] = field(default_factory=dict)
     signals: dict[str, VehicleSignals] = field(default_factory=dict)
     crosslink: CrosslinkLog | None = None
+    fault: FaultLabel | None = None
 
 
 @dataclass
@@ -166,11 +168,14 @@ def run_mission(
     duration_s: float | None = None,
     draws: SeedDraws | None = None,
     overrides: dict[str, dict[str, float]] | None = None,
+    fault: FaultConfig | None = None,
 ) -> MissionRun:
     """Propagate all six vehicles end to end with the mission thread.
 
-    `overrides` maps a vehicle to ParamView overrides (dotted path -> value), e.g. fault
-    parameters; the fault injector (M7) will fill these with onset profiles.
+    `overrides` maps a vehicle to fixed ParamView overrides (dotted path -> value). `fault`
+    selects the seeded fault draw (default), no fault, or a forced fault (and lead); the
+    injector schedules the faulted parameter(s) on that vehicle's ParamView, and every model
+    reads them at the current time.
     """
     start_wall = time.perf_counter()
     draws = draws or draw_seed(params, seed)
@@ -191,6 +196,11 @@ def run_mission(
     mask = v0.get("scenario.elevation_mask_deg")
     model = OrbitModel.from_params(params, sats, draws, pole, Forces())
     y0 = initial_states(params, sats, draws.epoch_utc)
+
+    injector = _fault_setup(params, fault or FaultConfig(), draws, clock, rot, sun_u, sun_ecef,
+                            sites, mask, pole, overrides or {})
+    if injector is not None:
+        injector.install(views[injector.fault.vehicle])
 
     suspend: dict[str, list[tuple[float, float]]] = {}
     plans: dict[str, _TakePlan] = {}
@@ -234,8 +244,10 @@ def run_mission(
         dynamic = np.zeros(n_t, dtype=bool)
         if sat in plans:
             p = plans[sat]
-            s_in = slew(view, p.q_slew_in_0, p.q_take_0, h0=h_wheel[0, k])
-            s_out = slew(view, p.q_take_end, p.q_idle_end, h0=s_in.h[-1])
+            h_in = _coast(view, np.zeros(h_wheel.shape[-1]), 0.0, p.t_slew_in, tick)
+            s_in = slew(view.at(p.t_slew_in), p.q_slew_in_0, p.q_take_0, h0=h_in)
+            h_out = _coast(view, s_in.h[-1], p.t_take, p.t_end, tick)
+            s_out = slew(view.at(p.t_end), p.q_take_end, p.q_idle_end, h0=h_out)
             slews[sat] = [s_in, s_out]
             t_out_end = p.t_end + s_out.duration_s
             rec = TakeRecord(sat, p.t_take, p.t_end, p.target_ecef, p.lat, p.lon,
@@ -249,8 +261,7 @@ def run_mission(
                         dynamic[n] = True
             in_slew = ((t >= p.t_slew_in) & (t < p.t_take)) | ((t > p.t_end) & (t <= t_out_end))
             gate_slew[:, k] = in_slew
-            h_wheel[t > p.t_take, k] = s_in.h[-1]
-            h_wheel[t > t_out_end, k] = s_out.h[-1]
+            anchors = [(p.t_take, s_in.h[-1]), (t_out_end, s_out.h[-1])]
             boresight = pointing.axis_from_label(params.bus(sat).imager.face)
             for n in (int(i) for i in np.flatnonzero((t >= p.t_take) & (t <= p.t_end))):
                 gate_take[n, k] = True
@@ -267,6 +278,9 @@ def run_mission(
                 rec.boresight_error_rad.append(float(np.arctan2(np.linalg.norm(np.cross(b, los)),
                                                                 b @ los)))
             takes[sat] = rec
+        else:
+            anchors = []
+        h_wheel[:, k] = _wheel_ticks(view, t, tick, h_wheel[:, k], dynamic, anchors)
         for n in range(n_t):
             if not dynamic[n]:
                 m = min(n + 1, n_t - 1)
@@ -302,7 +316,7 @@ def run_mission(
     for sat, rec in takes.items():
         n = int(np.flatnonzero(np.isclose(t, rec.t_take_s))[0])
         rec.payload_K = float(thermal[sat].node(PAYLOAD_NODE)[n])
-        rec.dark_current_e_s_px = dark_current_e_s_px(views[sat], rec.payload_K)
+        rec.dark_current_e_s_px = dark_current_e_s_px(views[sat].at(rec.t_take_s), rec.payload_K)
     signals = {
         sat: _vehicle_signals(
             draws.seed, views[sat], k, t, traj, q, omega, sun_u, gate_pass, gate_take,
@@ -343,6 +357,7 @@ def run_mission(
         saa=saa,
         signals=signals,
         crosslink=link_log,
+        fault=injector.label(t) if injector is not None else None,
     )
 
 
@@ -375,7 +390,7 @@ def _integrate(
     ctrls = {
         s: BurnController(records[s], tick, dt, suspend.get(s)) for s in records
     }
-    burn_idx = [(sats.index(s), s) for s in records]
+    burn_idx = [(sats.index(s), s) for s in records if s in sats]
     mass = np.array([views[s].get("mass.wet_mass_kg") for s in sats])
     prop = np.array([views[s].get("thruster.propellant_kg") for s in sats])
     out = _Trajectory(
@@ -411,7 +426,7 @@ def _integrate(
                 if ctrl.rec.accel_m_s2 <= 0:
                     continue  # a zero-delta-v burn orders nothing
                 q = pointing.burn(view, a_cmd, sun_u[n])
-                st = thrust_step(view, a_cmd, float(m_start[k]), float(prop[k]), q, dt)
+                st = thrust_step(view.at(t_step), a_cmd, float(m_start[k]), float(prop[k]), q, dt)
                 a_thr[k] = st.a_thr_km_s2
                 ctrl.rec.dv_m_s += st.dv_m_s
                 ctrl.rec.propellant_used_kg += st.dm_kg
@@ -475,7 +490,7 @@ def _plan_take(
     q0 = attitude_before(t_take - duration)
     for _ in range(_SLEW_TIME_ITERATIONS):
         q0 = attitude_before(t_take - duration)
-        new = plan_slew(view, q0, q_take).duration_s
+        new = plan_slew(view.at(t_take - duration), q0, q_take).duration_s
         if new == duration:
             break
         duration = new
@@ -485,7 +500,7 @@ def _plan_take(
                                normal_at(traj.r[n_end, k], traj.v[n_end, k]))
     q_idle_end = pointing.sun_hold(view, sun_u[n_end],
                                    normal_at(traj.r[n_end, k], traj.v[n_end, k]))
-    out_duration = plan_slew(view, q_take_end, q_idle_end).duration_s
+    out_duration = plan_slew(view.at(t_end), q_take_end, q_idle_end).duration_s
     window = (
         math.floor(t_slew_in / dt) * dt,
         math.ceil((t_end + out_duration) / dt) * dt,
@@ -518,6 +533,7 @@ def _thermal_start(
     """Initial node temperatures (scenario `thermal_init`). `settled` uses the first orbit of the
     run (idle Sun hold; burns and takes come hours later) as the periodic environment before
     epoch; `fixed` starts every node at `thermal_initial_K`."""
+    view.at(float(t[0]))  # the settled start uses pre-epoch, fault-free values
     if view.params.scenario.thermal_init == "fixed":
         return th.initial_temps()
     mu = view.get("scenario.constants.mu_km3_s2")
@@ -558,6 +574,7 @@ def _run_power_thermal(
     temps = np.empty((len(t), len(th.names)))
     ib = th.names.index(BATTERY_NODE)
     for n in range(len(t)):
+        view.at(float(t[n]))  # faulted parameters (F1, F2, F7) at this tick
         temps[n] = T
         env = thermal_env(q[n, k], r[n, k], sun_u[n], float(shadow[n, k]))
         in_take = take is not None and take.t_take_s <= t[n] < take.t_end_s
@@ -639,4 +656,77 @@ def _vehicle_signals(
             "uv_hold": eps.uv_hold,
         },
     )
+
+
+def _fault_setup(
+    params: Params,
+    cfg: FaultConfig,
+    draws: SeedDraws,
+    clock: Clock,
+    rot: F64,
+    sun_u: F64,
+    sun_ecef: F64,
+    sites: list[Station],
+    mask: float,
+    pole: F64,
+    overrides: dict[str, dict[str, float]],
+) -> Injector | None:
+    """Spec: Faults. Pick the fault (seeded draw, or forced), and arm it by the fault lead
+    before the faulted vehicle's take start in the fault-free plan of the same seed, so a fault
+    cannot move its own onset. Returns None for no fault or when that vehicle has no take in the
+    run."""
+    if cfg.mode == "none":
+        return None
+    fid, lead = draw_fault(params, draws.seed)
+    if cfg.mode == "forced":
+        if cfg.fault_id is None:
+            raise ValueError("a forced fault needs fault_id")
+        fid = cfg.fault_id
+        lead = lead if cfg.lead_s is None else cfg.lead_s
+    sat = params.faults.faults[fid].vehicle
+    view = ParamView(params, sat)
+    view.overrides.update(overrides.get(sat, {}))
+    model = OrbitModel.from_params(params, [sat], draws, pole, Forces())
+    y0 = initial_states(params, [sat], draws.epoch_utc)
+    traj = _integrate(params, {sat: view}, [sat], draws, clock, model, y0, rot, sun_u, sites,
+                      mask, {})
+    t = clock.tick_times_s()
+    plan = _plan_take(view, 0, t, clock.tick_s, clock.step_s, traj, rot, sun_u, sun_ecef)
+    if plan is None:
+        return None
+    return Injector(params, fid, plan.t_take - lead, lead, clock.tick_s)
+
+
+def _coast(view: ParamView, h: F64, t_from: float, t_to: float, tick: float) -> F64:
+    """Wheel momentum between slews: no torque, so only bearing friction acts, with the spec's
+    discrete update at the slew step, c read at each tick (F3)."""
+    step = view.get("scenario.slew.step_s")
+    out = np.array(h, dtype=np.float64)
+    t_now = t_from
+    while t_now < t_to - 1e-9:
+        span = min(tick - (t_now % tick) if t_now % tick else tick, t_to - t_now)
+        c = view.at(t_now).array("wheels.c")
+        out = out * (1.0 - c * step) ** (span / step)
+        t_now += span
+    return out
+
+
+def _wheel_ticks(
+    view: ParamView, t: F64, tick: float, h: F64, dynamic: B, anchors: list[tuple[float, F64]]
+) -> F64:
+    """Wheel momentum at every tick: slew samples where a slew is flying, otherwise the latest
+    known state (start, or the end of a slew) coasted under bearing friction."""
+    out = np.array(h, dtype=np.float64)
+    t_ref, h_ref = 0.0, np.zeros(h.shape[1])
+    pending = sorted(anchors, key=lambda a: a[0])
+    for n in range(len(t)):
+        while pending and pending[0][0] <= t[n]:
+            t_ref, h_ref = pending[0][0], np.array(pending[0][1])
+            pending.pop(0)
+        if dynamic[n]:
+            continue
+        h_ref = _coast(view, h_ref, t_ref, float(t[n]), tick)
+        t_ref = float(t[n])
+        out[n] = h_ref
+    return out
 

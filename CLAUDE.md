@@ -45,13 +45,16 @@ pytest
 - `src/expand3/sensors.py` (GNSS, star tracker, IMU, EPS and thermistor noise, SoC estimate, tank
   gauge, `VehicleSignals`), `links.py` (crosslink), `vehicle/cdh.py` (IGRF-14, SAA, edge
   computer, upsets) and `vehicle/payload.py` (dark current).
+- `src/expand3/faults.py`: `FaultConfig` (seeded, none or forced), `draw_fault`, `Injector`
+  (onset profiles and `ParamView` schedules) and `FaultLabel`.
 - `src/expand3/mission/thread.py`: `run_mission(params, seed)` runs all six vehicles end to end
   and returns per-tick truth: r, v, q, omega, wheel h, mass, gates, the burn log, the take
-  records, `eps[sat]`, `thermal[sat]`, `saa[sat]`, `signals[sat]` and `crosslink`.
+  records, `eps[sat]`, `thermal[sat]`, `saa[sat]`, `signals[sat]`, `crosslink` and the `fault`
+  label.
 - `src/expand3/constellation.py`: `propagate_constellation` gives r and v at ticks, plus the Sun,
   the shadow fraction and station visibility.
 - `src/expand3/units.py`: definitional unit conversions only.
-- Stubs for later milestones: `faults.py`, `recorder.py` and `run.py`.
+- Stubs for later milestones: `recorder.py` and `run.py`.
 - `tests/unit`, `tests/invariants` (conservation and bounds), `tests/reference` (external
   references such as IGRF), `tests/faults` and `tests/regression` (seeded golden runs).
 
@@ -62,8 +65,9 @@ pytest
 - **Quaternions:** scalar first `[w, x, y, z]`, rotating body to inertial.
 - **No numeric literals in model code.** Every number comes from `params/` through `ParamView`
   (`view.get("eps.R_pack_ohm")`, `view.array("wheels.k")`). `ParamView.overrides`, keyed by
-  the dotted paths in `faults.yaml`, is how faults change parameters, so code that reads
-  `Params` directly cannot see faults. Structural constants such as 0, 1 and array indices are
+  the dotted paths in `faults.yaml`, fixes values for tests, and `ParamView.schedule` (filled by
+  the injector) makes them functions of time read at `view.at(t)`. Code that reads `Params`
+  directly cannot see either. Structural constants such as 0, 1 and array indices are
   fine; physical or tuning values are not.
 - **Cite the spec.** Each function that implements a spec equation names the spec section in its
   docstring.
@@ -289,3 +293,29 @@ M6 choices where the spec is silent:
   - Nominally about 7.7 % of the time is inside the SAA, with 8-19 upsets per vehicle in 72 h.
 - **Imager.** D uses the payload node temperature at take start; it is recorded with the take.
 
+
+
+M7 choices where the spec is silent:
+
+- **Schedules.** A faulted path is a function of time on the faulted vehicle's `ParamView`.
+  Every model reads it at the current time, set with `view.at(t)`: each control tick for EPS,
+  thermal, upsets and the crosslink, each 10 s step for the thruster, the start of each slew for
+  the wheels, and the take start for the imager. Reading a scheduled path before any time is set
+  is an error. The precedence is overrides, then schedule, then the loaded value.
+- **Onset.** The fault arms on the first control tick at or after t0 = take start - lead. The
+  F1 ramp runs from the arm tick, so it reaches x3 at arm + 6 h.
+- **t0 source.** t0 comes from the fault-free plan of the same seed: one fault-free integration
+  of the faulted vehicle, and its take tick from that first pass (no burn-suspension replan). A
+  fault therefore cannot move its own onset. If that vehicle has no take within the run, no
+  fault is armed.
+- **Forcing.** A forced fault without a forced lead uses the seed's drawn lead. The draws use
+  `draw.fault` (uniform over F1..F10) and `draw.fault_lead`.
+- **Wheels between slews.** With no torque only bearing friction acts. Momentum coasts under the
+  spec's discrete update at the 1 s slew step, with c read at each tick, so F3 drains it there
+  too. Nominal c = 0 leaves it unchanged. Wheel momentum is near zero outside slews (rest-to-rest
+  from zero), so F3 shows mainly as the -c h dt drag inside the take slews.
+- **F5/F6.** These affect only the part of SAT-4's burn flown after arm. Coverage over seeds is
+  reported in the M7 report.
+- **Isolation.** Other vehicles are bit-identical to the no-fault run. The only differences are
+  crosslink messages the faulted vehicle sends (they carry its changed state, under F5/F6) and
+  drops on its links (F8).

@@ -67,8 +67,7 @@ def crosslink(
     r_meas = np.full((n_t, n_p, 3), np.nan)
     v_meas = np.full((n_t, n_p, 3), np.nan)
     r_e = views[sats[0]].get("scenario.constants.R_E_km")
-    p_of = {s: np.array([views[s].get("crosslink.drop_probability") for _ in range(n_t)])
-            for s in sats}
+    p_of = {s: views[s].get_series("crosslink.drop_probability", t_s) for s in sats}
     for j, (a, b) in enumerate(pairs):
         ka, kb = sats.index(a), sats.index(b)
         va = views[a]
