@@ -25,6 +25,9 @@ station_keeping_burn_length_draw_h: {draw: uniform, low: 5, high: 7}   # default
 station_keeping_dv_m_s: 1.0     # default, spec silent: delivered delta-v at nominal eta_F, prograde
 take_duration_s: 60             # default, spec silent
 eps_initial_soc: 0.8            # default, spec silent
+thermal_init: settled           # default, spec silent: settled (orbit-averaged steady state + spin-up) or fixed
+thermal_init_orbits: 3          # default, spec silent: periodic orbits flown from the steady state before epoch
+thermal_initial_K: 293.15       # default, spec silent: every node starts here when thermal_init is fixed
 # Temporary node temperatures for EPS until the M5 thermal network supplies them (default, spec silent)
 placeholder_node_temperature_K: {wings: 298.15, battery: 293.15, payload: 293.15}
 # Slew defaults: not in spec (spec: "minimum-torque plan with a PD trim"). See CLAUDE.md Known gaps.

@@ -41,8 +41,8 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "N", "SIM", "RUF", "NPY", "PT"]
-# Spec symbols (E_cap_J, R_pack_ohm, C_J_K, ...) are kept verbatim as field names.
-ignore = ["N815"]
+# Spec symbols (E_cap_J, R_pack_ohm, C_J_K, T, G, Q, ...) are kept verbatim as names.
+ignore = ["N803", "N806", "N815"]
 
 [tool.mypy]
 python_version = "3.12"
