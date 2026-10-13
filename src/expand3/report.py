@@ -246,7 +246,8 @@ def build_report(batch_dir: Path, params_dir: Path | None = None,
            if m["draws"]["fault_id"] in ("F5", "F6")]
     walls = np.array([m["wall_s"] for m in manifests]) if manifests else np.zeros(0)
     runtime = [{"runs": len(walls), "mean_s": float(walls.mean()) if len(walls) else 0.0,
-                "min_s": float(walls.min(initial=0.0)), "max_s": float(walls.max(initial=0.0)),
+                "min_s": float(walls.min()) if len(walls) else 0.0,
+                "max_s": float(walls.max()) if len(walls) else 0.0,
                 "total_s": float(walls.sum())}]
     batch_man = batch_dir / MANIFEST
     if batch_man.is_file():
