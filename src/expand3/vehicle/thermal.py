@@ -24,6 +24,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy.optimize import root
 
 from expand3.mission.pointing import axis_from_label
 from expand3.params import ParamView
@@ -36,6 +37,8 @@ _PAIR_LINK = re.compile(r"^(\w+?)_to_(\w+?)_W_K$")
 _SIDE_RING = "face_to_face_around_sides_W_K"
 _WING_HINGE = "wing_to_its_face_hinge_W_K"
 _WING_PREFIX, _FACE_PREFIX = "wing_", "bus_"
+_ORBIT_HEAT_MAX_CYCLES = 20
+_ORBIT_HEAT_ENERGY_TOL_J = 1.0  # numerical convergence tolerance, not a model value
 
 
 @dataclass(frozen=True)
@@ -258,3 +261,88 @@ def run_offline(
         out[n] = T
         T = thermal.step(T, heat, env, dt)
     return out
+
+
+@dataclass(frozen=True)
+class SettledInit:
+    """Settled initial state: the orbit-averaged steady state, its per-node balance residual [W],
+    the orbit-mean absorbed environment and node heat [W], and T0 after the periodic spin-up."""
+
+    T0: F64
+    T_steady: F64
+    residual_W: F64
+    absorbed_mean_W: F64
+    heat_mean_W: F64
+
+
+def orbit_heat(
+    eps: Eps, thermal: Thermal, envs: list[ThermalEnv], dt: float
+) -> list[dict[str, float]]:
+    """Nominal node heat over one periodic orbit: EPS with no pass, take, slew or burn gates,
+    heaters held off, node temperatures at the fixed initial value. The orbit is flown repeatedly
+    from the initial SoC until the pack energy at the end of an orbit repeats (to 1 J), so the
+    pack losses are those of the periodic orbit rather than of the initial charge."""
+    temps = thermal.temps_map(thermal.initial_temps())
+    state = eps.initial_state()
+    out: list[dict[str, float]] = []
+    for _ in range(_ORBIT_HEAT_MAX_CYCLES):
+        e_start = state.E_J
+        out = []
+        for env in envs:
+            state = dataclasses.replace(state, battery_heater=False, payload_heater=False)
+            step, state = eps.step(state, EpsInputs(env.shadow, env.sun_body, temps), dt)
+            out.append(step.heat_W)
+        if abs(state.E_J - e_start) < _ORBIT_HEAT_ENERGY_TOL_J:
+            break
+    return out
+
+
+def steady_state(network: Network, absorbed_W: F64, Q_W: F64, T_guess: F64) -> tuple[F64, F64]:
+    """Solve absorbed + Q + conduction - radiation = 0 (nonlinear in T^4) for every node; returns
+    the temperatures and the per-node residual [W]."""
+
+    def balance(T: F64) -> F64:
+        conduction = network.G @ T - network.G.sum(axis=1) * T
+        emitted = network.eps * network.area_rad * network.sigma * T**4
+        out: F64 = absorbed_W + Q_W + conduction - emitted
+        return out
+
+    sol = root(balance, T_guess, method="hybr", tol=1e-13)
+    T = np.asarray(sol.x, dtype=np.float64)
+    return T, balance(T)
+
+
+def settled_initial_temps(
+    thermal: Thermal,
+    envs: list[ThermalEnv],
+    heats: list[dict[str, float]],
+    dt: float,
+    orbits: int,
+    shoot: bool = True,
+) -> SettledInit:
+    """Spec silent (CLAUDE.md Known gaps): solve the steady state of the orbit-averaged
+    environment and node heat over one idle orbit, refine it to the periodic orbit of that
+    environment (Newton shooting on the one-orbit map), then fly `orbits` orbits from it; the end
+    state is T(t = 0). `shoot=False` skips the refinement (plain spin-up), for checks."""
+    net = thermal.network()
+    absorbed = np.mean([np.sum(net.absorbed_w(env), axis=0) for env in envs], axis=0)
+    q_mean = np.mean([thermal.heat_vector(h) for h in heats], axis=0)
+    T_ss, residual = steady_state(net, absorbed, q_mean, thermal.initial_temps())
+    q_vecs = [thermal.heat_vector(h) for h in heats]
+
+    def one_orbit(T: F64) -> F64:
+        for env, q in zip(envs, q_vecs, strict=True):
+            T = net.step(T, q, env, dt)
+        return T
+
+    # The steady state of the averaged inputs is not the periodic orbit (radiation goes as T^4),
+    # and the battery's 5.6 h time constant would carry that offset for many orbits. Shoot for
+    # the periodic orbit, T = one_orbit(T), starting from the steady state.
+    T = T_ss.copy()
+    if shoot:
+        sol = root(lambda x: one_orbit(x) - x, T_ss, method="hybr", tol=1e-10)
+        T = np.asarray(sol.x, dtype=np.float64)
+    for _ in range(orbits):
+        T = one_orbit(T)
+    return SettledInit(T, T_ss, residual, absorbed, q_mean)
+

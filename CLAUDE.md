@@ -223,13 +223,24 @@ M5 choices where the spec is silent:
   A_si and the view factor. A_i is the full area, both sides for a wing.
 - **Coupling order.** Each tick, EPS runs with the node temperatures at the tick start, then the
   network takes one Euler step with that tick's EPS node heat.
-- **Initial temperature.** Every node starts at 293.15 K (`scenario.thermal_initial_K`).
-- **Settling.**
-  - The forcing is not strictly periodic: passes add 60 W of radio heat 0-3 times per orbit, which
-    moves even orbit means by about 0.3 K. Settling is therefore measured as the time after which
-    runs started 20 K hotter and 20 K colder agree.
-  - Agreement to 1 K comes at 29 h on Bus A and 35 h on Bus B; to 0.1 K at 44 h and 54 h.
-  - The battery is the slowest node: C = 8000 J/K on 0.4 W/K, a 5.6 h time constant.
+- **Initial temperature: settled start** (Alex's decision; `scenario.thermal_init: settled`).
+  - The first orbit of the run (idle Sun hold; burns and takes come hours later) is the periodic
+    environment before epoch.
+  - Node heat is EPS with no pass, take, slew or burn gates and heaters held off, flown until the
+    pack energy repeats orbit to orbit, so the pack losses are periodic ones, not the initial
+    charge.
+  - The steady state of the orbit-averaged environment and heat is solved with scipy (nonlinear
+    T^4), with a balance residual below 1e-6 W per node.
+  - It is then refined to the periodic orbit by Newton shooting on the one-orbit map. Without this
+    the battery starts about 2 K off and its 5.6 h time constant (C = 8000 J/K on 0.4 W/K) carries
+    the error for many hours, because radiation goes as T^4 and does not average linearly.
+  - Finally `thermal_init_orbits` = 3 orbits are flown from it. Because 190 ticks fall 11 s short
+    of the orbit period, the replayed orbit has that small phase seam.
+  - `thermal_init: fixed` starts every node at `thermal_initial_K` = 293.15 K, kept for tests.
+- **Settling under settled start.** The battery is within 0.1 K of an independent 30-orbit plain
+  spin-up from t = 0: 0.009 K on Bus A and 0.027 K on Bus B. From the old fixed 293.15 K start,
+  runs started 20 K hotter and colder took 44 h (Bus A) and 54 h (Bus B) to agree within 0.1 K,
+  because passes make the forcing only approximately periodic.
 - **F7 signature.**
   - In idle Sun hold, +z is on the Sun, so bus_px is edge-on and gets no direct Sun. F7
     (alpha, epsilon x3) adds albedo absorption and extra IR loss.
@@ -237,6 +248,6 @@ M5 choices where the spec is silent:
     most (1.7 K). Orbital swings change by less than 0.1 K.
   - The spec's "swing grows and the core carries it inward" would need bus_px to see the Sun,
     which it does only in some burn attitudes. The F7 test asserts the measured signature.
-- **Heaters.** In nominal runs the battery stays at 286-292 K and the payload at 282-291 K, so
-  neither heater ever cycles.
+- **Heaters.** In a nominal settled-start run the battery stays at 285-294 K and the payload at
+  276-291 K, so neither heater ever cycles.
 

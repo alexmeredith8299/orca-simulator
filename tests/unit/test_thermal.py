@@ -12,6 +12,8 @@ from expand3.vehicle.thermal import (
     Network,
     Thermal,
     ThermalEnv,
+    settled_initial_temps,
+    steady_state,
     step_power_and_thermal,
     thermal_env,
 )
@@ -186,3 +188,23 @@ def test_cold_case_heater_and_inhibit(params: Params) -> None:
     assert np.all(second.p_string_W > warm)  # colder cells are more efficient
     ib = th.names.index("battery")
     assert T2[ib] > T[ib]
+
+
+@pytest.mark.parametrize("sat", ["SAT-1", "SAT-5"])
+def test_steady_state_balance(params: Params, sat: str) -> None:
+    th = Thermal(ParamView(params, sat))
+    net = th.network()
+    nadir = np.array([0.0, 0, -1])
+    envs = [ThermalEnv(1.0 if k < 60 else 0.0, Z, nadir, 6903.137, -0.6) for k in range(95)]
+    absorbed = np.mean([np.sum(net.absorbed_w(e), axis=0) for e in envs], axis=0)
+    heat = {"obc": 15.0, "radio_pa": 9.0, "payload": 10.0, "bus_nz": 22.0, "battery": 1.0}
+    T, residual = steady_state(net, absorbed, th.heat_vector(heat), th.initial_temps())
+    assert np.abs(residual).max() < 1e-6
+    assert np.all((T > 150) & (T < 400))
+    init = settled_initial_temps(th, envs, [heat] * len(envs), 30.0, orbits=3)
+    assert np.abs(init.residual_W).max() < 1e-6
+    np.testing.assert_allclose(init.T_steady, T)
+    # the periodic orbit sits a few K off the steady state of the averaged inputs (T^4); the
+    # shooting solve finds what a long brute-force spin-up converges to
+    brute = settled_initial_temps(th, envs, [heat] * len(envs), 30.0, orbits=120, shoot=False)
+    np.testing.assert_allclose(init.T0, brute.T0, atol=0.01)

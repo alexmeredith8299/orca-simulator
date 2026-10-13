@@ -162,6 +162,8 @@ class Scenario(_Model):
     station_keeping_dv_m_s: float
     take_duration_s: float
     eps_initial_soc: float = Field(ge=0, le=1)
+    thermal_init: Literal["settled", "fixed"] = "settled"
+    thermal_init_orbits: int = Field(ge=0)
     thermal_initial_K: float
     placeholder_node_temperature_K: dict[str, float]
     slew: Slew

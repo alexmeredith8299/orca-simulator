@@ -45,7 +45,14 @@ from expand3.timebase import Clock, SeedDraws, draw_seed
 from expand3.vehicle.attitude import quat_conj, quat_mul, quat_rotate
 from expand3.vehicle.eps import Eps, EpsHistory, EpsInputs, history
 from expand3.vehicle.orbit import Forces, OrbitModel, initial_states, rk4_step
-from expand3.vehicle.thermal import Thermal, ThermalHistory, step_power_and_thermal, thermal_env
+from expand3.vehicle.thermal import (
+    Thermal,
+    ThermalHistory,
+    orbit_heat,
+    settled_initial_temps,
+    step_power_and_thermal,
+    thermal_env,
+)
 from expand3.vehicle.thruster import thrust_step
 
 F64 = NDArray[np.float64]
@@ -460,6 +467,24 @@ def _wheel_power_per_tick(
     return out
 
 
+def _thermal_start(
+    view: ParamView, eps: Eps, th: Thermal, k: int, t: F64, tick: float, q: F64, r: F64,
+    shadow: F64, sun_u: F64,
+) -> F64:
+    """Initial node temperatures (scenario `thermal_init`). `settled` uses the first orbit of the
+    run (idle Sun hold; burns and takes come hours later) as the periodic environment before
+    epoch; `fixed` starts every node at `thermal_initial_K`."""
+    if view.params.scenario.thermal_init == "fixed":
+        return th.initial_temps()
+    mu = view.get("scenario.constants.mu_km3_s2")
+    period = 2 * np.pi * np.sqrt(view.get("scenario.orbit.a_km") ** 3 / mu)
+    n_orbit = min(round(period / tick), len(t))
+    envs = [thermal_env(q[n, k], r[n, k], sun_u[n], float(shadow[n, k])) for n in range(n_orbit)]
+    heats = orbit_heat(eps, th, envs, tick)
+    orbits = view.params.scenario.thermal_init_orbits
+    return settled_initial_temps(th, envs, heats, tick, orbits).T0
+
+
 def _run_power_thermal(
     view: ParamView,
     k: int,
@@ -480,7 +505,7 @@ def _run_power_thermal(
     eps = Eps(view)
     th = Thermal(view)
     state = eps.initial_state()
-    T = th.initial_temps()
+    T = _thermal_start(view, eps, th, k, t, tick, q, r, shadow, sun_u)
     wheel_w = _wheel_power_per_tick(t, tick, take, slews, view.get("scenario.slew.step_s"))
     steps = []
     temps = np.empty((len(t), len(th.names)))

@@ -5,7 +5,14 @@ import pytest
 
 from expand3.mission.thread import MissionRun
 from expand3.params import Params, ParamView
-from expand3.vehicle.thermal import Thermal, run_offline, thermal_env
+from expand3.vehicle.eps import Eps
+from expand3.vehicle.thermal import (
+    Thermal,
+    orbit_heat,
+    run_offline,
+    settled_initial_temps,
+    thermal_env,
+)
 
 pytestmark = pytest.mark.slow
 SETTLE_TOL_K = 0.1
@@ -31,18 +38,6 @@ def drive(params: Params, run: MissionRun, sat: str, view: ParamView | None = No
     return th, run_offline(th, envs, heats, params.scenario.control_tick_s, T0)
 
 
-def settle_time_s(params: Params, run: MissionRun, sat: str, tol: float = SETTLE_TOL_K) -> float:
-    """How long the initial temperatures matter. The forcing is not periodic (ground passes
-    switch 60 W of radio heat on 0-3 times per orbit), so settling is measured as the time after
-    which runs started SPREAD_K above and below the initial temperature agree within SETTLE_TOL_K
-    at every node, under the same environment and node heat."""
-    n_nodes = len(run.thermal[sat].names)
-    _, hot = drive(params, run, sat, T0=np.full(n_nodes, 293.15 + SPREAD_K))
-    _, cold = drive(params, run, sat, T0=np.full(n_nodes, 293.15 - SPREAD_K))
-    bad = np.flatnonzero(np.abs(hot - cold).max(axis=1) > tol)
-    return float(run.t_s[bad[-1] + 1]) if bad.size else 0.0
-
-
 def limits_for(params: Params, sat: str, node: str) -> tuple[float, float]:
     lim = params.bus(sat).thermal.limits_K
     return lim.get(node, lim["others"])
@@ -55,28 +50,67 @@ def test_thermal_recorded(mission72: MissionRun) -> None:
         assert np.all(np.isfinite(th.T_K))
 
 
-def test_settles_and_stays_within_limits(params: Params, mission72: MissionRun) -> None:
+REFERENCE_ORBITS = 30  # plain spin-up, ~48 h, much longer than the battery's 5.6 h time constant
+
+
+def settled_start(params: Params, run: MissionRun, sat: str, orbits: int,
+                  shoot: bool = True) -> np.ndarray:
+    """The settled initializer as run_mission applies it, with a chosen spin-up length."""
+    view = ParamView(params, sat)
+    k = run.sats.index(sat)
+    n_orbit = orbit_ticks(params)
+    envs = [thermal_env(run.q[n, k], run.r_km[n, k], run.sun_unit[n], float(run.shadow[n, k]))
+            for n in range(n_orbit)]
+    th = Thermal(view)
+    heats = orbit_heat(Eps(view), th, envs, params.scenario.control_tick_s)
+    return settled_initial_temps(th, envs, heats, params.scenario.control_tick_s, orbits,
+                                 shoot=shoot).T0
+
+
+def test_settled_start(params: Params, mission72: MissionRun) -> None:
+    """Under settled start the battery is on the converged trajectory almost from t = 0. The
+    converged trajectory is the same network started from an independent REFERENCE_ORBITS plain
+    spin-up (no shooting)."""
+    assert params.scenario.thermal_init == "settled"
+    print()
+    for sat in QUIET:
+        th = mission72.thermal[sat]
+        ib = th.names.index("battery")
+        start = settled_start(params, mission72, sat, params.scenario.thermal_init_orbits)
+        np.testing.assert_allclose(th.T_K[0], start, rtol=1e-12)
+        _, run = drive(params, mission72, sat, T0=start)
+        _, ref = drive(params, mission72, sat,
+                       T0=settled_start(params, mission72, sat, REFERENCE_ORBITS, shoot=False))
+        dev = np.abs(run[:, ib] - ref[:, ib])
+        after6 = mission72.t_s >= 6 * 3600
+        assert dev[after6].max() < 0.5
+        bad = np.flatnonzero(dev > SETTLE_TOL_K)
+        t01 = float(mission72.t_s[bad[-1] + 1]) if bad.size else 0.0
+        n_nodes = len(th.names)
+        _, hot = drive(params, mission72, sat, T0=np.full(n_nodes, 293.15 + SPREAD_K))
+        _, cold = drive(params, mission72, sat, T0=np.full(n_nodes, 293.15 - SPREAD_K))
+        n6 = int(np.searchsorted(mission72.t_s, 6 * 3600))
+        print(f"{sat}: battery vs converged |dT| at 0 h {dev[0]:.3f} K, max after 6 h "
+              f"{dev[after6].max():.3f} K, within 0.1 K from {t01 / 3600:.1f} h; old +-20 K "
+              f"bracket at 6 h: hot {hot[n6, ib] - run[n6, ib]:+.2f} K, "
+              f"cold {cold[n6, ib] - run[n6, ib]:+.2f} K")
+
+
+def test_stays_within_limits(params: Params, mission72: MissionRun) -> None:
     print()
     for sat in mission72.sats:
         th = mission72.thermal[sat]
-        quiet = sat in QUIET
-        t_settle = settle_time_s(params, mission72, sat) if quiet else 48 * 3600.0
-        t_1k = settle_time_s(params, mission72, sat, tol=1.0) if quiet else 0.0
-        assert t_settle < mission72.t_s[-1] - 6 * 3600, f"{sat} did not settle"
-        n0 = int(np.searchsorted(mission72.t_s, t_settle))
-        # limits hold over the whole run, transient included
         for j, node in enumerate(th.names):
             lo, hi = limits_for(params, sat, node)
             assert th.T_K[:, j].min() >= lo, (sat, node, th.T_K[:, j].min())
             assert th.T_K[:, j].max() <= hi, (sat, node, th.T_K[:, j].max())
         eps = mission72.eps[sat]
-        parts = [f"{sat}: within 1 K at {t_1k / 3600:.1f} h, 0.1 K at {t_settle / 3600:.1f} h"
-                 if quiet else f"{sat} (from 48 h):"]
+        parts = [f"{sat} (full run):"]
         for node in ("battery", "payload", "bus_px", "wing_px"):
-            seg = th.node(node)[n0:]
+            seg = th.node(node)
             parts.append(f"{node} {seg.min():.1f}-{seg.max():.1f} K")
-        parts.append(f"heater duty batt {eps.battery_heater[n0:].mean():.2f} "
-                     f"payload {eps.payload_heater[n0:].mean():.2f}")
+        parts.append(f"heater duty batt {eps.battery_heater.mean():.2f} "
+                     f"payload {eps.payload_heater.mean():.2f}")
         print(", ".join(parts))
 
 
