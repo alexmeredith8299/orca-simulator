@@ -10,7 +10,8 @@ from typing import Any
 from expand3.detect.classify import run_classifier, save_model
 from expand3.detect.config import DetectConfig
 from expand3.detect.harness import detect_batch, detector_names, read_alarms, write_alarms
-from expand3.detect.registry import CLASSIFIER, REGISTRY, describe
+from expand3.detect.rawclf import run_raw_classifier
+from expand3.detect.registry import CLASSIFIER, CLASSIFIERS, RAW_CLASSIFIER, REGISTRY, describe
 from expand3.detect.score import compare, score_seeds, write_comparison, write_score
 from expand3.faults import FaultConfig
 from expand3.report import build_report
@@ -108,24 +109,31 @@ def _batch_seeds(batch: Path) -> list[int]:
                   if (d / "manifest.json").is_file())
 
 
+_INFO = {CLASSIFIER: "classifier", RAW_CLASSIFIER: "classifier_raw"}
+
+
 def _detect(args: argparse.Namespace) -> int:
     names = detector_names(args.detector)
     seeds = _batch_seeds(args.batch) if args.seeds is None else parse_seeds(args.seeds)
     out = args.out or args.batch / "detect" / args.detector.replace(",", "+")
     cfg = DetectConfig(target_far_per_vehicle_day=args.target_far)
     tune = parse_seeds(args.tune)
-    plain = [n for n in names if n != CLASSIFIER]
+    plain = [n for n in names if n not in CLASSIFIERS]
     alarms = detect_batch(args.batch, plain, tune, seeds, out, cfg, args.params, args.workers)
-    if CLASSIFIER in names:
+    for clf in (n for n in names if n in CLASSIFIERS):
         if args.forced is None:
-            raise SystemExit("clf needs --forced DIR with the forced-fault batches F1..F10")
+            raise SystemExit(f"{clf} needs --forced DIR with the forced-fault batches F1..F10")
         forced = sorted(p for p in args.forced.glob("F*") if p.is_dir())
-        clf_alarms, result = run_classifier(args.batch, forced, list(cfg.clf_inputs), tune, seeds,
-                                            cfg, args.params, REGISTRY, args.workers)
-        save_model(out, result)
+        if clf == CLASSIFIER:
+            clf_alarms, result = run_classifier(args.batch, forced, list(cfg.clf_inputs), tune,
+                                                seeds, cfg, args.params, REGISTRY, args.workers)
+        else:
+            clf_alarms, result = run_raw_classifier(args.batch, forced, tune, seeds, cfg,
+                                                    args.params, args.workers)
+        save_model(out, result, clf)
         alarms = sorted([*alarms, *clf_alarms], key=lambda a: (a.seed, a.t_s, a.sat_id))
         write_alarms(out / "alarms.csv", alarms)
-        (out / "classifier.json").write_text(json.dumps(result["info"], indent=2) + "\n")
+        (out / f"{_INFO[clf]}.json").write_text(json.dumps(result["info"], indent=2) + "\n")
     print(f"detect: {len(alarms)} alarms over {len(seeds)} seeds -> {out / 'alarms.csv'}")
     return 0
 
@@ -186,6 +194,5 @@ def _ran(alarms_path: Path) -> list[str]:
     cal = alarms_path.parent / "calibration.json"
     if cal.is_file():
         names += list(json.loads(cal.read_text()).get("thresholds", {}))
-    if (alarms_path.parent / "classifier.json").is_file():
-        names.append(CLASSIFIER)
+    names += [n for n in CLASSIFIERS if (alarms_path.parent / f"{_INFO[n]}.json").is_file()]
     return names

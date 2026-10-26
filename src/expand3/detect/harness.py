@@ -24,7 +24,7 @@ from expand3.detect.base import Alarm, Detector, Trace
 from expand3.detect.config import DetectConfig
 from expand3.detect.data import SeedData, seed_dirs
 from expand3.detect.glr import episodes, tune_threshold
-from expand3.detect.registry import CLASSIFIER, FAMILIES, REGISTRY
+from expand3.detect.registry import CLASSIFIERS, FAMILIES, REGISTRY
 
 FAMILY_NAMES = set(FAMILIES)
 ALARM_FIELDS = ["seed", "detector", "sat_id", "t_s", "fault_id", "score", "detail"]
@@ -36,13 +36,13 @@ def detector_names(text: str) -> list[str]:
     for token in (n.strip() for n in text.split(",")):
         if token == "all":
             names += list(REGISTRY)
-        elif token == CLASSIFIER:
+        elif token in CLASSIFIERS:
             names.append(token)
         elif token in FAMILY_NAMES and token != "classifier":
             names += [n for n, cls in REGISTRY.items() if cls.family == token]
         else:
             names.append(token)
-    unknown = [n for n in names if n not in REGISTRY and n != CLASSIFIER]
+    unknown = [n for n in names if n not in REGISTRY and n not in CLASSIFIERS]
     if unknown:
         raise ValueError(f"unknown detector {unknown}; choose from {sorted(REGISTRY)} or all")
     return names

@@ -131,3 +131,42 @@ expand3 detect DIR --detector physics,learned,peer,clf --forced ~/orca-batches/m
 expand3 detect DIR --detector unsupervised --workers 12 --out DIR/detect/unsup
 expand3 compare DIR --alarms DIR/detect/datadriven/alarms.csv DIR/detect/unsup/alarms.csv
 ```
+
+## Raw-signal classifier (`clf_raw`)
+
+`clf` classifies the scores of the other detectors. `clf_raw` (`rawclf.py`, `rawfeatures.py`)
+classifies the measured signals themselves, so its nominal values and sensitivities are all
+learned. At each 15 min decision time a vehicle's features are window statistics (1 h and 6 h) of
+the signals the physics residuals read: string power against the other strings while sunlit, pack
+voltage and current (and the slope of V on I), every thermistor, upsets and SAA time over longer
+windows, the delivered fraction of messages sent and received, the least-squares k and c of each
+wheel over the latest slew, and the dark current and payload temperature of the latest take. The
+context features of the learned residuals are added. No threshold or nominal value is built in.
+Labels, folds (by seed), training data and the false-alarm threshold are as for `clf`; the model
+is one gradient-boosted classifier per bus.
+
+Run: `expand3 detect DIR --detector clf_raw --forced ~/orca-batches/m9_forced --workers 12
+--out DIR/detect/raw` (about 10 min), then `expand3 compare` with the other alarm files.
+
+Results (tune / test, detection rate and median delay, isolation before the take):
+
+- F1: found on 7/7 tune seeds and 1/1 test seed, isolated before the take on 6/7 and 1/1. `clf`
+  isolated it before the take on 2/7 and 0/1, so raw signals beat the residual scores here.
+- F2, F4, F9, F10: the same as `clf`. F8 is found on every seed but later (2.3 ks against 0.4 ks)
+  because its windows are 1 h. F3 is found on 6/7 tune seeds (`clf`: 7/7).
+- F7: found on half of the seeds (tune and test), at a median delay of 14-18 h. `clf` finds all of
+  them at 3-4 h. The slow 1.5 K cooling needs the residual against a context model, which the
+  trees on raw temperatures do not build.
+- F5 and F6: no better than `clf` (F5 1/9, F6 0/6 on tune).
+- False alarms: 0.032 per vehicle-day on tune and 0.049 on test, against 0.049 and 0.108 for `clf`.
+  Most are on SAT-4 (30 of 50 over all 100 seeds, `clf` 82 of 91), where the fault is F5 or F6.
+
+Limitations:
+
+- **Faults only occur on Bus A.** In the main batch and the forced runs every fault is on SAT-2,
+  SAT-3 or SAT-4. The Bus B model has no fault rows, so it can never alarm; its zero false alarms
+  lower the pooled rate, which is why the false-alarm comparison with `clf` is not like for like.
+  A fault on SAT-5 or SAT-6 would go unseen. A classifier on bus-normalised residuals (as `clf`
+  has) would carry over to Bus B; trees on raw signals cannot.
+- The test split has 1 F1 seed and 2 F7 seeds, so the F1 and F7 test results are single seeds.
+- The window features give a minimum delay of about one decision step (15 min).

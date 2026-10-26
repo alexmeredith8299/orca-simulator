@@ -64,6 +64,11 @@ class DetectConfig:
     clf_floor: float = 0.5
     clf_inputs: tuple[str, ...] = ("f2", "f8", "f9", "f10", "wheels", "lrn_thermal_ridge",
                                    "lrn_eps_ridge", "peer_thermal", "peer_eps", "peer_saa")
+    # raw-signal classifier: trailing windows over the measured signals
+    raw_windows_s: tuple[float, ...] = (3600.0, 21600.0)
+    raw_count_windows_s: tuple[float, ...] = (21600.0, 86400.0, 1e12)
+    raw_min_samples: int = 4
+    raw_ratio_floor: float = 1e-9
     # peer differencing
     peer_reference: str = "SAT-1"
     peer_targets: tuple[str, ...] = ("SAT-2", "SAT-3")

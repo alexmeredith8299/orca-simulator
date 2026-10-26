@@ -70,7 +70,8 @@ expand3 score /path/outside/repo                                # tune 0:70, tes
   `harness.py` (calibrate on the tune seeds, alarms) and `score.py` (delay, lead, false alarms,
   isolation). Data-driven detectors: `features.py`, `models.py`, `learned.py` (ridge and HGB
   residuals), `peer.py`, `unsup.py` (PCA, isolation forest) and `classify.py` (isolation
-  classifier); needs the `detect-ml` extra. Reports: `docs/detection-report.md` and
+  classifier), `rawfeatures.py` and `rawclf.py` (classifier on raw signal windows); needs
+  the `detect-ml` extra. Reports: `docs/detection-report.md` and
   `docs/detection-datadriven-report.md`.
 - `tests/unit`, `tests/invariants` (conservation and bounds), `tests/reference` (external
   references such as IGRF), `tests/faults` and `tests/regression` (seeded golden runs).

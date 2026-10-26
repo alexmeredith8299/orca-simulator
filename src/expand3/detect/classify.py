@@ -110,7 +110,11 @@ def _classifier(cfg: DetectConfig) -> Any:
 def _proba(model: Any, x: F64) -> F64:
     """Class probabilities in CLASSES order (zero for classes the model never saw)."""
     out = np.zeros((len(x), len(CLASSES)))
-    out[:, [int(c) for c in model.classes_]] = model.predict_proba(x)
+    seen = [int(c) for c in model.classes_]
+    if len(seen) == 1:  # one class (a fold with no fault): sklearn still returns 2 columns
+        out[:, seen[0]] = 1.0
+    else:
+        out[:, seen] = model.predict_proba(x)
     return out
 
 
@@ -138,42 +142,76 @@ def run_classifier(batch: Path, forced_dirs: list[Path], input_names: list[str],
                                              workers).items():
             rows.add(SeedData(seed_dirs(fdir)[s]), traces, keys, cfg, f"forced:{fdir.name}")
     x, y, seed, sat, t, tag = rows.arrays()
-    train = np.isin(seed, tune) & (y != SKIP)
+    group = np.full(len(x), "all", dtype="U8")
+    alarms, info, models = fit_and_alarm("clf", (x, y, seed, sat, t, tag, group), tune, seeds,
+                                         cfg)
+    info.update(keys=keys)
+    return alarms, {"info": info, "model": models["all"]}
+
+
+RowArrays = tuple[F64, NDArray[np.int_], NDArray[np.int_], NDArray[np.str_], F64,
+                  NDArray[np.str_], NDArray[np.str_]]
+
+
+def fit_and_alarm(name: str, rows: RowArrays, tune: list[int], seeds: list[int],
+                  cfg: DetectConfig) -> tuple[list[Alarm], dict[str, Any], dict[str, Any]]:
+    """Fit one classifier per group (a bus, or all rows) on the tune rows and alarm on `seeds`.
+
+    Rows are (x, y, seed, sat, t, tag, group). Tune seeds are scored out of fold by seed. The
+    threshold of each group is tuned on its out-of-fold scores at the fault-free decision times
+    of the main tune seeds; test seeds use the model fitted on all the group's training rows.
+    """
+    x, y, seed, sat, t, tag, group = rows
     prob = np.zeros((len(x), len(CLASSES)))
-    for held in folds(seed[train], cfg.clf_folds):
-        idx = np.flatnonzero(train)
-        fit_rows, held_rows = idx[~held], idx[held]
-        model = _classifier(cfg).fit(x[fit_rows], y[fit_rows])
-        every = np.flatnonzero(np.isin(seed, np.unique(seed[held_rows])))
-        prob[every] = _proba(model, x[every])
-    final = _classifier(cfg).fit(x[train], y[train])
-    test_rows = np.isin(seed, seeds) & ~np.isin(seed, tune)
-    prob[test_rows] = _proba(final, x[test_rows])
-    not_nominal = 1.0 - prob[:, 0]
-    # threshold from out-of-fold scores on the main tune seeds' fault-free decision times
-    main = tag == "main"
-    null, days = [], 0.0
-    for s in tune:
-        for v in np.unique(sat[main & (seed == s)]):
-            sel = main & (seed == s) & (sat == v)
-            null.append(not_nominal[sel & (y == 0)])
-            days += float(np.sum(sel & (y == 0))) * cfg.clf_step_s / 86400.0
-    h = tune_threshold(null, days, cfg.target_far_per_vehicle_day, cfg.clf_floor)
-    alarms = []
-    for s in seeds:
-        for v in np.unique(sat[main & (seed == s)]):
-            sel = np.flatnonzero(main & (seed == s) & (sat == v))
-            for i in episodes(not_nominal[sel], h):
-                r = sel[i]
-                guess = CLASSES[1 + int(np.argmax(prob[r, 1:]))]
-                alarms.append(Alarm(s, "clf", str(v), float(t[r]), guess, float(not_nominal[r])))
+    models: dict[str, Any] = {}
+    thresholds: dict[str, float] = {}
+    per_class: dict[str, dict[str, int]] = {}
+    dropped: dict[str, list[int]] = {}
+    alarms: list[Alarm] = []
+    for g in np.unique(group):
+        here = group == g
+        train = here & np.isin(seed, tune) & (y != SKIP)
+        # a column with no value in the group (a thermistor the bus lacks) cannot be binned
+        keep = ~np.all(np.isnan(x[train]), axis=0)
+        xg = x[:, keep]
+        dropped[str(g)] = [int(i) for i in np.flatnonzero(~keep)]
+        for held in folds(seed[train], cfg.clf_folds):
+            idx = np.flatnonzero(train)
+            fit_rows, held_rows = idx[~held], idx[held]
+            model = _classifier(cfg).fit(xg[fit_rows], y[fit_rows])
+            every = np.flatnonzero(here & np.isin(seed, np.unique(seed[held_rows])))
+            prob[every] = _proba(model, xg[every])
+        final = _classifier(cfg).fit(xg[train], y[train])
+        test_rows = here & np.isin(seed, seeds) & ~np.isin(seed, tune)
+        prob[test_rows] = _proba(final, xg[test_rows])
+        models[str(g)] = final
+        per_class[str(g)] = {c: int(np.sum(y[train] == i)) for i, c in enumerate(CLASSES)}
+        not_nominal = 1.0 - prob[:, 0]
+        main = here & (tag == "main")
+        null, days = [], 0.0
+        for s in tune:
+            for v in np.unique(sat[main & (seed == s)]):
+                sel = main & (seed == s) & (sat == v)
+                null.append(not_nominal[sel & (y == 0)])
+                days += float(np.sum(sel & (y == 0))) * cfg.clf_step_s / 86400.0
+        h = tune_threshold(null, days, cfg.target_far_per_vehicle_day, cfg.clf_floor)
+        thresholds[str(g)] = h
+        for s in seeds:
+            for v in np.unique(sat[main & (seed == s)]):
+                sel = np.flatnonzero(main & (seed == s) & (sat == v))
+                for i in episodes(not_nominal[sel], h):
+                    r = sel[i]
+                    guess = CLASSES[1 + int(np.argmax(prob[r, 1:]))]
+                    alarms.append(Alarm(s, name, str(v), float(t[r]), guess,
+                                        float(not_nominal[r])))
     alarms.sort(key=lambda a: (a.seed, a.t_s, a.sat_id))
-    info = {"threshold": h, "keys": keys, "classes": list(CLASSES),
-            "train_rows": int(train.sum()),
-            "rows_per_class": {c: int(np.sum(y[train] == i)) for i, c in enumerate(CLASSES)}}
-    return alarms, {"info": info, "model": final}
+    info = {"threshold": thresholds, "classes": list(CLASSES),
+            "train_rows": {g: sum(c.values()) for g, c in per_class.items()},
+            "rows_per_class": per_class, "dropped_columns": dropped}
+    return alarms, info, models
 
 
-def save_model(out: Path, result: dict[str, Any]) -> None:
-    with (out / "classifier.pkl").open("wb") as f:
+def save_model(out: Path, result: dict[str, Any], name: str = "clf") -> None:
+    stem = "classifier" if name == "clf" else "classifier_raw"
+    with (out / f"{stem}.pkl").open("wb") as f:
         pickle.dump(result, f)
