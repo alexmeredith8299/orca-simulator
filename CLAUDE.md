@@ -28,6 +28,8 @@ Batch runs and the validation report:
 ```bash
 expand3 run --seeds 0:100 --out /path/outside/repo --workers 8
 expand3 report /path/outside/repo
+expand3 detect /path/outside/repo --detector all --workers 8   # tune seeds 0:70
+expand3 score /path/outside/repo                                # tune 0:70, test 70:100
 ```
 
 ## Layout
@@ -63,6 +65,13 @@ expand3 report /path/outside/repo
 - `src/expand3/units.py`: definitional unit conversions only.
 - `src/expand3/recorder.py` (Parquet and labels per run), `run.py` (`run_seed`, `run_batch`,
   manifests), `report.py` (validation report) and `cli.py` (`expand3 run`, `expand3 report`).
+- `src/expand3/detect/`: fault detection on batch outputs. `glr.py` (sliding-window Gaussian,
+  Poisson and binomial GLR, `tune_threshold`), `detectors.py` (F2, F8, F9, F10 and F3/F4),
+  `harness.py` (calibrate on the tune seeds, alarms) and `score.py` (delay, lead, false alarms,
+  isolation). Data-driven detectors: `features.py`, `models.py`, `learned.py` (ridge and HGB
+  residuals), `peer.py`, `unsup.py` (PCA, isolation forest) and `classify.py` (isolation
+  classifier); needs the `detect-ml` extra. Reports: `docs/detection-report.md` and
+  `docs/detection-datadriven-report.md`.
 - `tests/unit`, `tests/invariants` (conservation and bounds), `tests/reference` (external
   references such as IGRF), `tests/faults` and `tests/regression` (seeded golden runs).
 
@@ -82,8 +91,10 @@ expand3 report /path/outside/repo
 - **Randomness** comes only from named `numpy.random.SeedSequence` substreams derived from the run
   seed, for example `noise.gnss.SAT-2` and `draw.fault`. Never use global or unnamed RNGs. Adding a
   stream must not shift the draws of the others.
-- **No detection or estimation logic** goes in this repo. It simulates truth plus the sensors and
-  telemetry the spec defines.
+- **No detection or estimation logic** goes in the simulator. It simulates truth plus the sensors
+  and telemetry the spec defines. Detectors live in `src/expand3/detect/`, read batch outputs only,
+  and import nothing from the simulator but `params`; only `cli.py` imports the package
+  (`tests/detect/test_separation.py`).
 - **Exit tests come first.** Write each milestone's exit tests before its code.
 
 ## Milestones

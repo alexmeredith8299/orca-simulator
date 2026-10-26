@@ -30,6 +30,10 @@ dev = [
     "mypy",
     "types-PyYAML",
 ]
+# data-driven detectors in expand3.detect
+detect-ml = [
+    "scikit-learn",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -54,7 +58,7 @@ strict = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["ppigrf", "ppigrf.*", "scipy", "scipy.*", "astropy", "astropy.*", "erfa", "erfa.*", "pyarrow", "pyarrow.*"]
+module = ["ppigrf", "ppigrf.*", "scipy", "scipy.*", "astropy", "astropy.*", "erfa", "erfa.*", "pyarrow", "pyarrow.*", "sklearn", "sklearn.*"]
 ignore_missing_imports = true
 
 [tool.pydantic-mypy]
