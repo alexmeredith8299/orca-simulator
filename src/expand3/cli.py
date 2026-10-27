@@ -1,15 +1,26 @@
-"""Command line: `expand3 run`, `expand3 report` (M8), `expand3 detect` and `expand3 score`."""
+"""Command line: `expand3 run`, `expand3 report` (M8), `expand3 detect`, `expand3 score`,
+`expand3 compare` and `expand3 posterior`."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import pickle
+import re
 from pathlib import Path
 from typing import Any
 
 from expand3.detect.classify import run_classifier, save_model
 from expand3.detect.config import DetectConfig
-from expand3.detect.harness import detect_batch, detector_names, read_alarms, write_alarms
+from expand3.detect.harness import (
+    calibrate_nominal,
+    compute_traces,
+    detect_batch,
+    detector_names,
+    read_alarms,
+    write_alarms,
+)
+from expand3.detect.posterior import posterior_batch, write_posterior
 from expand3.detect.rawclf import run_raw_classifier
 from expand3.detect.registry import CLASSIFIER, CLASSIFIERS, RAW_CLASSIFIER, REGISTRY, describe
 from expand3.detect.score import compare, score_seeds, write_comparison, write_score
@@ -83,7 +94,27 @@ def main(argv: list[str] | None = None) -> int:
     sc.add_argument("--tune", default="0:70")
     sc.add_argument("--test", default="70:100")
     sc.add_argument("--out", type=Path, default=None, help="default: next to the alarms")
+    po = sub.add_parser("posterior", help="fault probabilities from detector scores")
+    po.add_argument("batch", type=Path)
+    po.add_argument("--detector", required=True,
+                    help="detector names, one per fault id unless --select (for example "
+                         "mcd_thermal,mcd_eps), or all")
+    po.add_argument("--select", action="store_true",
+                    help="when several detectors cover a fault, keep the one with the lowest "
+                         "tune log loss")
+    po.add_argument("--tune", default="0:70", help="seeds that fit the posterior")
+    po.add_argument("--test", default="70:100")
+    po.add_argument("--nominal", type=Path, default=None,
+                    help="nominal.pkl of an earlier `detect` run of the same detectors and tune "
+                         "seeds, to skip calibration")
+    po.add_argument("--p-alarm", type=float, default=0.9,
+                    help="probability at which an alarm is written (for `expand3 score`)")
+    po.add_argument("--out", type=Path, default=None, help="default: BATCH/detect/posterior")
+    po.add_argument("--workers", type=int, default=1)
+    po.add_argument("--params", type=Path, default=DEFAULT_PARAMS)
     args = ap.parse_args(argv)
+    if args.cmd == "posterior":
+        return _posterior(args)
     if args.cmd == "detect":
         return _detect(args)
     if args.cmd == "score":
@@ -110,6 +141,31 @@ def _batch_seeds(batch: Path) -> list[int]:
 
 
 _INFO = {CLASSIFIER: "classifier", RAW_CLASSIFIER: "classifier_raw"}
+
+
+def _posterior(args: argparse.Namespace) -> int:
+    # unsupervised detectors name subsystems, not faults, so they carry no posterior
+    names = [n for n in detector_names(args.detector)
+             if any(re.fullmatch(r"F\d+", f) for f in REGISTRY[n].fault_ids)]
+    tune, test = parse_seeds(args.tune), parse_seeds(args.test)
+    out = args.out or args.batch / "detect" / "posterior"
+    cfg = DetectConfig()
+    if args.nominal is not None:
+        with args.nominal.open("rb") as f:
+            nominal = {n: v for n, v in pickle.load(f).items() if n in names}
+    else:
+        nominal = calibrate_nominal(args.batch, names, tune, cfg, args.params, args.workers)
+    traces = compute_traces(args.batch, nominal, [*tune, *test], cfg, args.params, args.workers)
+    post = posterior_batch(args.batch, names, tune, test, traces, cfg, args.params, args.p_alarm,
+                           args.select)
+    write_posterior(out, post)
+    write_alarms(out / "alarms.csv", post["alarms"])
+    for fid, c in sorted(post["channels"].items()):
+        m = post["metrics"]["test"][fid]
+        print(f"{fid} ({c['detector']}): a={c['a']:.3g} c={c['c']:.3g}; test log loss "
+              f"{m['log_loss']:.4f} vs prior {m['log_loss_prior']:.4f}, ECE {m['ece']:.4f}")
+    print(f"posterior -> {out / 'posterior.md'}")
+    return 0
 
 
 def _detect(args: argparse.Namespace) -> int:

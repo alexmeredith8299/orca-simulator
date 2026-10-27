@@ -5,11 +5,12 @@ from __future__ import annotations
 from expand3.detect.base import Detector
 from expand3.detect.detectors import DETECTORS
 from expand3.detect.learned import LEARNED
+from expand3.detect.mcdrop import MCD
 from expand3.detect.peer import PEER
 from expand3.detect.unsup import UNSUP
 
-REGISTRY: dict[str, type[Detector]] = {**DETECTORS, **LEARNED, **PEER, **UNSUP}
-FAMILIES = ("physics", "learned", "peer", "unsupervised", "classifier")
+REGISTRY: dict[str, type[Detector]] = {**DETECTORS, **LEARNED, **MCD, **PEER, **UNSUP}
+FAMILIES = ("physics", "learned", "bayesian", "peer", "unsupervised", "classifier")
 
 
 CLASSIFIER = "clf"

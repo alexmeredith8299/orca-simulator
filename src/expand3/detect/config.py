@@ -64,6 +64,23 @@ class DetectConfig:
     clf_floor: float = 0.5
     clf_inputs: tuple[str, ...] = ("f2", "f8", "f9", "f10", "wheels", "lrn_thermal_ridge",
                                    "lrn_eps_ridge", "peer_thermal", "peer_eps", "peer_saa")
+    # Monte Carlo dropout forecaster (extra detect-dl)
+    mcd_stride: int = 10
+    mcd_lags: int = 24
+    mcd_hidden: int = 32
+    mcd_layers: int = 2
+    mcd_dropout: float = 0.2
+    mcd_epochs: int = 20
+    mcd_batch: int = 512
+    mcd_lr: float = 2e-3
+    mcd_weight_decay: float = 1e-5
+    mcd_samples: int = 20
+    mcd_window: int = 12
+    mcd_val_mod: int = 5
+    mcd_max_rows: int = 200_000
+    mcd_threads: int = 8
+    mcd_sigma_floor: float = 1e-3
+    mcd_device: str = "auto"
     # raw-signal classifier: trailing windows over the measured signals
     raw_windows_s: tuple[float, ...] = (3600.0, 21600.0)
     raw_count_windows_s: tuple[float, ...] = (21600.0, 86400.0, 1e12)
