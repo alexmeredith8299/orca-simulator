@@ -163,3 +163,6 @@ def test_two_detectors_for_one_fault_need_a_selection_rule(
     assert set(cand) == {"f2", "lrn_eps_ridge"}
     best = min(cand, key=lambda n: cand[n]["tune_log_loss"])
     assert post["channels"]["F2"]["detector"] == best        # chosen on tune data only
+    for m in cand.values():                                  # reported for comparison only
+        assert np.isfinite(m["test_log_loss"])
+        assert m["test_log_loss"] >= 0.0

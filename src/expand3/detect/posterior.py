@@ -234,7 +234,15 @@ def posterior_batch(batch: Path, names: list[str], tune: list[int], test: list[i
             ch = fit_channel(s_all, off_all, y_all)
             keep = np.isfinite(off_all)
             loss = reliability(ch.prob(s_all, off_all)[keep], y_all[keep])["log_loss"]
-            candidates.setdefault(fid, {})[det] = {"a": ch.a, "c": ch.c, "tune_log_loss": loss}
+            # the test loss is reported for comparison and never enters the choice
+            tcols = [rows(s, fid, det) for s in test]
+            ts = np.concatenate([np.nan_to_num(c[0].score) for c in tcols])
+            toff = np.concatenate([c[1] for c in tcols])
+            ty = np.concatenate([c[2] for c in tcols])
+            tkeep = np.isfinite(toff)
+            test_loss = reliability(ch.prob(ts, toff)[tkeep], ty[tkeep])["log_loss"]
+            candidates.setdefault(fid, {})[det] = {"a": ch.a, "c": ch.c, "tune_log_loss": loss,
+                                                   "test_log_loss": test_loss}
             if best is None or loss < best[0]:
                 best = (loss, det, ch)
         assert best is not None
@@ -306,8 +314,10 @@ def write_posterior(out: Path, post: dict[str, Any]) -> None:
               f"| {c['c']:.3g} |" for fid, c in sorted(post["channels"].items())]
     if any(len(c) > 1 for c in post["candidates"].values()):
         lines += ["", "Candidates (the lowest tune log loss is kept):", "",
-                  "| fault | detector | a | c | tune log loss |", "|---|---|---|---|---|"]
-        lines += [f"| {fid} | {det} | {m['a']:.3g} | {m['c']:.3g} | {m['tune_log_loss']:.4f} |"
+                  "| fault | detector | a | c | tune log loss | test log loss |",
+                  "|---|---|---|---|---|---|"]
+        lines += [f"| {fid} | {det} | {m['a']:.3g} | {m['c']:.3g} | {m['tune_log_loss']:.4f} "
+                  f"| {m['test_log_loss']:.4f} |"
                   for fid, c in sorted(post["candidates"].items()) for det, m in sorted(c.items())]
     for split in ("tune", "test"):
         lines += ["", f"## {split}: calibration of P(fault active) where the prior is nonzero", "",

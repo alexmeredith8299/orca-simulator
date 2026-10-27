@@ -71,8 +71,10 @@ expand3 score /path/outside/repo                                # tune 0:70, tes
   isolation). Data-driven detectors: `features.py`, `models.py`, `learned.py` (ridge and HGB
   residuals), `peer.py`, `unsup.py` (PCA, isolation forest) and `classify.py` (isolation
   classifier), `rawfeatures.py` and `rawclf.py` (classifier on raw signal windows); needs
-  the `detect-ml` extra. Reports: `docs/detection-report.md` and
-  `docs/detection-datadriven-report.md`.
+  the `detect-ml` extra. `mcdrop.py` (Monte Carlo dropout LSTM forecasters, `detect-dl` extra) and
+  `posterior.py` (P(fault) from detector scores: spec prior, tempered GLR evidence, `expand3
+  posterior`). Reports: `docs/detection-report.md`, `docs/detection-datadriven-report.md` and
+  `docs/detection-posterior-report.md`.
 - `tests/unit`, `tests/invariants` (conservation and bounds), `tests/reference` (external
   references such as IGRF), `tests/faults` and `tests/regression` (seeded golden runs).
 
