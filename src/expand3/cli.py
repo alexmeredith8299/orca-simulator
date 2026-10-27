@@ -79,6 +79,9 @@ def main(argv: list[str] | None = None) -> int:
     de.add_argument("--out", type=Path, default=None, help="default: BATCH/detect/DETECTOR")
     de.add_argument("--target-far", type=float, default=DetectConfig().target_far_per_vehicle_day,
                     help="alarm episodes per fault-free vehicle-day the thresholds allow")
+    de.add_argument("--nominal", type=Path, default=None,
+                    help="nominal.pkl fitted earlier on the same tune seeds; the detectors are "
+                         "not refitted")
     de.add_argument("--workers", type=int, default=1)
     de.add_argument("--params", type=Path, default=DEFAULT_PARAMS)
     cp = sub.add_parser("compare", help="per-fault comparison of detectors from alarm files")
@@ -175,7 +178,12 @@ def _detect(args: argparse.Namespace) -> int:
     cfg = DetectConfig(target_far_per_vehicle_day=args.target_far)
     tune = parse_seeds(args.tune)
     plain = [n for n in names if n not in CLASSIFIERS]
-    alarms = detect_batch(args.batch, plain, tune, seeds, out, cfg, args.params, args.workers)
+    nominal = None
+    if args.nominal is not None:
+        with args.nominal.open("rb") as f:
+            nominal = pickle.load(f)
+    alarms = detect_batch(args.batch, plain, tune, seeds, out, cfg, args.params, args.workers,
+                          nominal)
     for clf in (n for n in names if n in CLASSIFIERS):
         if args.forced is None:
             raise SystemExit(f"{clf} needs --forced DIR with the forced-fault batches F1..F10")

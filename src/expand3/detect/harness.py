@@ -139,11 +139,18 @@ def tune_thresholds(names: list[str], by_seed: TraceSet, tune: list[int], cfg: D
 
 def run_detectors(batch: Path, names: list[str], tune: list[int], seeds: list[int],
                   cfg: DetectConfig, params_dir: Path | None, workers: int = 1,
-                  keep: dict[str, Any] | None = None) -> tuple[list[Alarm], dict[str, Any]]:
+                  keep: dict[str, Any] | None = None,
+                  nominal: dict[str, dict[str, Any]] | None = None
+                  ) -> tuple[list[Alarm], dict[str, Any]]:
     """Calibrate on `tune` and detect on `seeds`. Returns the alarms and the calibration. When
-    `keep` is given it receives the nominal values (`nominal`) and the traces (`traces`)."""
+    `keep` is given it receives the nominal values (`nominal`) and the traces (`traces`). Given
+    `nominal` (fitted earlier on the same tune seeds) the detectors are not refitted; the
+    thresholds are still tuned from the tune traces."""
     check_seeds(batch, [*tune, *seeds])
-    nominal = calibrate_nominal(batch, names, tune, cfg, params_dir, workers)
+    if nominal is None:
+        nominal = calibrate_nominal(batch, names, tune, cfg, params_dir, workers)
+    else:
+        nominal = {n: nominal[n] for n in names}
     by_seed = compute_traces(batch, nominal, [*tune, *seeds], cfg, params_dir, workers)
     thresholds, days = tune_thresholds(names, by_seed, tune, cfg)
     calibration: dict[str, Any] = {"config": cfg.as_dict(), "tune_seeds": sorted(tune),
@@ -171,9 +178,10 @@ def read_alarms(path: Path) -> list[Alarm]:
 
 
 def detect_batch(batch: Path, names: list[str], tune: list[int], seeds: list[int],
-                 out: Path, cfg: DetectConfig, params_dir: Path | None, workers: int = 1
-                 ) -> list[Alarm]:
-    alarms, calibration = run_detectors(batch, names, tune, seeds, cfg, params_dir, workers)
+                 out: Path, cfg: DetectConfig, params_dir: Path | None, workers: int = 1,
+                 nominal: dict[str, dict[str, Any]] | None = None) -> list[Alarm]:
+    alarms, calibration = run_detectors(batch, names, tune, seeds, cfg, params_dir, workers,
+                                        nominal=nominal)
     out.mkdir(parents=True, exist_ok=True)
     write_alarms(out / "alarms.csv", alarms)
     with (out / "nominal.pkl").open("wb") as f:

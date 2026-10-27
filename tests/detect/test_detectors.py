@@ -166,3 +166,14 @@ def test_alarm_csv_round_trip(batch: tuple[Path, list[int], list[int]], tmp_path
     alarms = detect_batch(out, ["f9"], tune, test, tmp_path, DetectConfig(), PARAMS_DIR)
     assert read_alarms(tmp_path / "alarms.csv") == alarms
     assert (tmp_path / "calibration.json").is_file()
+
+
+def test_given_nominal_values_skip_calibration_and_give_the_same_alarms(
+        batch: tuple[Path, list[int], list[int]], detected: list[Alarm]) -> None:
+    out, tune, test = batch
+    names = ["f2", "f8", "f9", "f10", "wheels"]
+    keep: dict = {}
+    run_detectors(out, names, tune, tune + test, CFG, PARAMS_DIR, keep=keep)
+    again, _ = run_detectors(out, names, tune, test, CFG, PARAMS_DIR, nominal=keep["nominal"])
+    assert [(a.seed, a.detector, a.sat_id, a.t_s, a.fault_id) for a in again] == \
+        [(a.seed, a.detector, a.sat_id, a.t_s, a.fault_id) for a in detected if a.seed in test]
