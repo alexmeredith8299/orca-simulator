@@ -15,8 +15,14 @@ ARM_S = 70000.0
 TAKE_S = 80000.0
 LAMBDA_IN = 5.5e-4
 D0, T_REF, DT_D = 10.0, 293.15, 6.5
-FAULT_VEHICLE = {"F1": "SAT-2", "F2": "SAT-2", "F3": "SAT-3", "F4": "SAT-3", "F7": "SAT-2",
-                 "F8": "SAT-2", "F9": "SAT-2", "F10": "SAT-2"}
+FAULT_VEHICLE = {"F1": "SAT-2", "F2": "SAT-2", "F3": "SAT-3", "F4": "SAT-3", "F5": "SAT-2",
+                 "F6": "SAT-2", "F7": "SAT-2", "F8": "SAT-2", "F9": "SAT-2", "F10": "SAT-2"}
+MU, A_KM, PERIOD_S = 398600.4418, 6903.137, 5700.0
+INCL = np.deg2rad(97.5)
+BURNS = {"SAT-2": (ARM_S + 600.0, END_S), "SAT-3": (30000.0, 50000.0)}  # [start, end) in s
+A_CMD = 8.0e-5  # ordered acceleration [m/s^2]: the synthetic burn is shorter than a real one
+THRUST_FAULT = 0.7  # delivered fraction after arm under F5 and F6
+
 NODES = ["bus_px", "bus_nx", "bus_py", "bus_ny", "bus_pz", "bus_nz", "wing_px", "wing_nx",
          "wing_py", "wing_ny", "battery", "obc", "radio_pa", "payload", "bus_core"]
 R_PACK = 0.08
@@ -32,6 +38,42 @@ def _wheel_rows(sat: str, slew: int, t0: float, k: np.ndarray, c: np.ndarray) ->
                      **{f"h_{j + 1}_Nms": h[j] for j in range(4)},
                      **{f"u_{j + 1}_Nm": u[j] for j in range(4)}})
     return rows
+
+
+def _burn_rows(t: np.ndarray) -> dict[str, np.ndarray]:
+    """Burn table rows (the ordered acceleration along +x) for every burning vehicle."""
+    rows: dict[str, list] = {k: [] for k in ("sat_id", "t_s", "a_cmd_x_m_s2", "a_cmd_y_m_s2",
+                                             "a_cmd_z_m_s2")}
+    for sat, (b0, b1) in BURNS.items():
+        tb = t[(t >= b0) & (t < b1)]
+        rows["sat_id"] += [sat] * tb.size
+        rows["t_s"] += list(tb)
+        rows["a_cmd_x_m_s2"] += [A_CMD] * tb.size
+        rows["a_cmd_y_m_s2"] += [0.0] * tb.size
+        rows["a_cmd_z_m_s2"] += [0.0] * tb.size
+    return {k: np.array(v) for k, v in rows.items()}
+
+
+def _gnss(t: np.ndarray, k: int, fault: str, faulted: bool, sat: str, rng: np.random.Generator
+          ) -> dict[str, np.ndarray]:
+    """Noisy position and velocity fixes on a circular orbit whose semi-major axis has a short
+    period oscillation and grows with the delta-v the burn delivers (less after an F5 or F6)."""
+    u = 2 * np.pi * t / PERIOD_S + 0.03 * k
+    dv = np.zeros_like(t)
+    if sat in BURNS:
+        b0, b1 = BURNS[sat]
+        factor = np.where((fault in ("F5", "F6")) & faulted & (t >= ARM_S), THRUST_FAULT, 1.0)
+        dv = np.cumsum(np.where((t >= b0) & (t < b1), A_CMD * factor * TICK_S, 0.0))
+    a_osc = A_KM + 5.0 * np.sin(2 * u) + 1.816 * dv  # km; 2 a dv / v with v = 7.6 km/s
+    r = a_osc  # circular: the radius is the semi-major axis here
+    v = np.sqrt(MU * (2.0 / r - 1.0 / a_osc))
+    pos = np.stack([r * np.cos(u), r * np.sin(u) * np.cos(INCL), r * np.sin(u) * np.sin(INCL)])
+    vel = np.stack([-v * np.sin(u), v * np.cos(u) * np.cos(INCL), v * np.cos(u) * np.sin(INCL)])
+    out = {"gnss_valid": (np.arange(t.size) % 2 == 0).astype(float)}
+    for i, ax in enumerate("xyz"):
+        out[f"gnss_r_{ax}_km_meas"] = pos[i] + 1.5e-3 * rng.standard_normal(t.size)
+        out[f"gnss_v_{ax}_km_s_meas"] = vel[i] + 5e-5 * rng.standard_normal(t.size)
+    return out
 
 
 def make_seed(out: Path, seed: int, fault: str) -> Path:
@@ -94,6 +136,10 @@ def make_seed(out: Path, seed: int, fault: str) -> Path:
         for ax in "xyz":
             cols[f"imu_omega_{ax}_rad_s_meas"] += list(5e-5 * rng.standard_normal(n))
     del meas
+    nav_rng = np.random.default_rng(seed + 10_000)  # its own stream: the others are unchanged
+    nav = [_gnss(t, k, fault, sat == vehicle, sat, nav_rng) for k, sat in enumerate(SATS)]
+    for name in nav[0]:
+        cols[name] = [v for fixes in nav for v in fixes[name]]
     pq.write_table(pa.table(cols), d / "measurements.parquet")
 
     link: dict[str, list] = {k: [] for k in ("t_s", "sender", "receiver", "sent", "delivered")}
@@ -130,7 +176,7 @@ def make_seed(out: Path, seed: int, fault: str) -> Path:
                    d / "takes.parquet")
     pq.write_table(pa.table({k: [r[k] for r in wheel_rows] for k in wheel_rows[0]}),
                    d / "wheel_steps.parquet")
-    pq.write_table(pa.table({"sat_id": ["SAT-2"], "t_s": [ARM_S + 600.0]}), d / "burns.parquet")
+    pq.write_table(pa.table(_burn_rows(t)), d / "burns.parquet")
     label: dict = {"fault": "none"}
     if fault != "none":
         label = {"fault": fault, "fault_id": fault, "vehicle": vehicle, "t_arm_s": ARM_S}

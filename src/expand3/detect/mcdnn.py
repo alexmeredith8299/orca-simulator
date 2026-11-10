@@ -33,11 +33,13 @@ import numpy as np
 from numpy.typing import NDArray
 
 from expand3.detect.base import Detector, Trace
+from expand3.detect.comms import hold
 from expand3.detect.data import SeedData
 from expand3.detect.features import context, sunlit
 from expand3.detect.glr import binomial_glr, gaussian_glr, poisson_glr, slope_glr
 from expand3.detect.mcdmulti import ALL, _MultiView, measured_block
 from expand3.detect.mcdrop import McdModel, McdThermal
+from expand3.params import load_params
 
 F64 = NDArray[np.float64]
 F32 = NDArray[np.float32]
@@ -292,6 +294,86 @@ class McdWheels(_Nn):
         return out
 
 
+# ---- F5, F6: thrust shortfall in the semi-major axis -----------------------------------------
+def gnss_elements(m: dict[str, F64], mu_km3_s2: float) -> tuple[F64, F64]:
+    """Semi-major axis [km] and argument of latitude [rad] from the measured fixes, NaN on ticks
+    without a valid fix. The argument of latitude is measured from the ascending node of the
+    fix's own orbit plane."""
+    r = np.stack([m[f"gnss_r_{ax}_km_meas"] for ax in "xyz"], axis=1)
+    v = np.stack([m[f"gnss_v_{ax}_km_s_meas"] for ax in "xyz"], axis=1)
+    h = np.cross(r, v)
+    node = np.stack([-h[:, 1], h[:, 0], np.zeros(len(h))], axis=1)
+    node /= np.linalg.norm(node, axis=1, keepdims=True)
+    a = 1.0 / (2.0 / np.linalg.norm(r, axis=1) - np.sum(v * v, axis=1) / mu_km3_s2)
+    u = np.arctan2(np.sum(np.cross(node, r) * h, axis=1) / np.linalg.norm(h, axis=1),
+                   np.sum(node * r, axis=1))
+    valid = m["gnss_valid"] > 0.5
+    return np.where(valid, a, np.nan), np.where(valid, u, np.nan)
+
+
+class McdBurn(_Nn):
+    """F5 and F6: the semi-major axis from the GNSS fixes against what the ordered delta-v so far
+    should have made of it.
+
+    A burn raises the semi-major axis by 2 a dv / v, about 1.8 km for the 1 m/s burn, while the
+    short-period J2 oscillation of the osculating axis is several km. The network learns that
+    oscillation from the argument of latitude and the growth from the cumulative ordered delta-v,
+    on nominal data, and a delivered thrust 30 % short appears as a negative miss that grows
+    with the burn. Both faults cut the delivered delta-v alike and differ only in the propellant
+    flow, which the tank gauge's noise (0.1 kg against 0.04 kg drained in a burn) hides, so one
+    score is reported under both ids and the two cannot be told apart from these signals.
+    """
+
+    name = "mcdn_burn"
+    fault_ids = ("F5", "F6")
+    block_key = "burn"
+    cols = ("semi_major_axis_km",)
+    overrides = (("mcd_epochs", 150), ("mcd_hidden", 64), ("mcd_sigma_floor", 1e-4))
+
+    def _mu(self) -> float:
+        assert self.params_dir is not None
+        return load_params(self.params_dir).scenario.constants.mu_km3_s2
+
+    @staticmethod
+    def ordered_dv(d: SeedData, sat: str, grid: F64) -> F64:
+        """Delta-v [m/s] ordered up to each tick of `grid`, from the burn table's commands."""
+        c = d.sat_columns("burns", sat, ["t_s", "a_cmd_x_m_s2", "a_cmd_y_m_s2", "a_cmd_z_m_s2"])
+        t = np.asarray(c["t_s"], dtype=np.float64)
+        if not t.size:
+            return np.zeros(len(grid))
+        a = np.linalg.norm(np.stack([np.asarray(c[k], dtype=np.float64) for k in
+                                     ("a_cmd_x_m_s2", "a_cmd_y_m_s2", "a_cmd_z_m_s2")], axis=1),
+                           axis=1)
+        order = np.argsort(t, kind="stable")
+        done = np.concatenate([[0.0], np.cumsum(a[order] * float(np.median(np.diff(grid))))])
+        return done[np.searchsorted(t[order], grid, side="right")]
+
+    def signal_block(self, d: SeedData, sat: str) -> F64:
+        m = d.measurements(sat)
+        a, _ = gnss_elements(m, self._mu())
+        idx, _ = hold(np.isfinite(a), 1.0)
+        held = np.where(idx >= 0, a[np.maximum(idx, 0)], np.nan)
+        return np.concatenate([measured_block(m), held[:, None],
+                               self.ordered_dv(d, sat, m["t_s"])[:, None]], axis=1)
+
+    def samples(self, d: SeedData, sat: str) -> Samples:
+        m = d.measurements(sat)
+        a, u = gnss_elements(m, self._mu())
+        pick = np.flatnonzero(np.isfinite(a))[:: max(self.cfg.mcd_stride // 2, 1)]
+        dv = self.ordered_dv(d, sat, m["t_s"])[pick]
+        local = np.stack([np.sin(u[pick]), np.cos(u[pick]), np.sin(2 * u[pick]),
+                          np.cos(2 * u[pick]), dv], axis=1)
+        return Samples(m["t_s"][pick], pick.astype(np.int64), local, a[pick, None])
+
+    def score(self, d: SeedData, per: dict[str, tuple[Samples, F64, F64]]) -> list[Trace]:
+        out = []
+        for sat, (s, mean, std) in per.items():
+            z = np.nan_to_num((s.y[:, 0] - mean[:, 0]) / std[:, 0])
+            score = gaussian_glr(z, 0.0, 1.0, self.cfg.nn_burn_window, side="down")
+            out += [Trace(sat, fid, s.t, score) for fid in self.fault_ids]
+        return out
+
+
 # ---- F2: string power, an LSTM like the thermal detectors ------------------------------------
 class McdStrings(_MultiView, McdThermal):
     """F2: each string's power while sunlit, scored for a drop."""
@@ -346,5 +428,5 @@ def _variants(base: Any) -> dict[str, type[Detector]]:
 
 
 MCDN: dict[str, type[Detector]] = {
-    k: v for base in (McdStrings, McdDrops, McdUpsets, McdDark, McdWheels)
+    k: v for base in (McdStrings, McdDrops, McdUpsets, McdDark, McdWheels, McdBurn)
     for k, v in _variants(base).items()}

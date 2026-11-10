@@ -5,7 +5,14 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from detect_synth import FAULT_VEHICLE, make_batch
+from detect_synth import (
+    A_CMD,
+    A_KM,
+    BURNS,
+    FAULT_VEHICLE,
+    PERIOD_S,
+    make_batch,
+)
 
 from expand3.detect.config import DetectConfig
 from expand3.detect.data import SeedData
@@ -13,7 +20,7 @@ from expand3.detect.harness import detector_names, run_detectors
 
 pytest.importorskip("torch")
 
-from expand3.detect.mcdnn import MCDN, blocks, trailing_sum
+from expand3.detect.mcdnn import MCDN, blocks, gnss_elements, trailing_sum
 
 PARAMS_DIR = Path(__file__).resolve().parents[2] / "params"
 CFG = DetectConfig(h_floor=12.0, mcd_epochs=10, mcd_hidden=16, mcd_lags=8, mcd_samples=10,
@@ -35,7 +42,7 @@ def test_trailing_sum_is_causal() -> None:
 
 
 def test_registry_names() -> None:
-    faults = ("mcd_f2", "mcdn_f8", "mcdn_f9", "mcdn_f10", "mcdn_wheels")
+    faults = ("mcd_f2", "mcdn_f8", "mcdn_f9", "mcdn_f10", "mcdn_wheels", "mcdn_burn")
     assert set(MCDN) == {f"{f}{s}" for f in faults for s in ("", "_sig", "_sig_comms")}
     assert not set(detector_names("all")) & set(MCDN)
 
@@ -74,11 +81,33 @@ def test_wheel_steps_target_the_momentum_change_which_is_the_command_when_health
     assert np.allclose(s.y, u, atol=1e-6)  # type: ignore[attr-defined]
 
 
+def test_orbit_elements_come_back_from_the_fixes(tmp_path: Path) -> None:
+    seed = make_batch(tmp_path, ["none"])[0]
+    m = SeedData(tmp_path / f"seed_{seed:05d}").measurements("SAT-1")
+    a, u = gnss_elements(m, 398600.4418)
+    ok = np.isfinite(a)
+    assert 0.4 < ok.mean() < 0.6  # fixes on every other tick
+    expected_u = 2 * np.pi * m["t_s"] / PERIOD_S
+    assert np.abs(np.angle(np.exp(1j * (u[ok] - expected_u[ok])))).max() < 0.01
+    assert np.abs(a[ok] - (A_KM + 5.0 * np.sin(2 * expected_u[ok]))).max() < 0.5
+
+
+def test_burn_input_is_the_delta_v_ordered_so_far(tmp_path: Path) -> None:
+    _, sam = _samples(tmp_path, "none", "mcdn_burn")
+    s = sam["SAT-3"]
+    b0, b1 = BURNS["SAT-3"]
+    expected = A_CMD * (np.clip(s.t, b0, b1) - b0)  # type: ignore[attr-defined]
+    assert np.abs(s.local[:, 4] - expected).max() < 3 * A_CMD * 30.0  # type: ignore[attr-defined]
+    assert np.all(sam["SAT-1"].local[:, 4] == 0.0)  # type: ignore[attr-defined]
+    assert s.y.shape == (len(s.t), 1)  # type: ignore[attr-defined]
+
+
 @pytest.mark.slow
 @pytest.mark.parametrize("suffix", ["", "_sig_comms"])
 @pytest.mark.parametrize(("name", "kind"), [("mcd_f2", "F2"), ("mcdn_f8", "F8"), ("mcdn_f9", "F9"),
                                        ("mcdn_f10", "F10"), ("mcdn_wheels", "F3"),
-                                       ("mcdn_wheels", "F4")])
+                                       ("mcdn_wheels", "F4"), ("mcdn_burn", "F5"),
+                                       ("mcdn_burn", "F6")])
 def test_the_faulted_vehicles_score_stands_out(tmp_path: Path, name: str, kind: str,
                                                suffix: str) -> None:
     seeds = make_batch(tmp_path, [*(["none"] * 8), kind])
