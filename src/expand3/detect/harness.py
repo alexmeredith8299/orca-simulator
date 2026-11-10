@@ -25,6 +25,7 @@ from expand3.detect.config import DetectConfig
 from expand3.detect.data import SeedData, seed_dirs
 from expand3.detect.glr import episodes, tune_threshold
 from expand3.detect.mcdmulti import MCDM
+from expand3.detect.mcdnn import MCDN
 from expand3.detect.registry import CLASSIFIERS, FAMILIES, REGISTRY
 
 FAMILY_NAMES = set(FAMILIES)
@@ -36,7 +37,7 @@ def detector_names(text: str) -> list[str]:
     names: list[str] = []
     for token in (n.strip() for n in text.split(",")):
         if token == "all":  # the multi-satellite comparison variants are chosen by name
-            names += [n for n in REGISTRY if n not in MCDM]
+            names += [n for n in REGISTRY if n not in MCDM and n not in MCDN]
         elif token in CLASSIFIERS:
             names.append(token)
         elif token in FAMILY_NAMES and token != "classifier":

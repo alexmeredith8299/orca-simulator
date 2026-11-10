@@ -1,6 +1,7 @@
 """The Monte Carlo dropout forecasters: windows, pickling, uncertainty and synthetic faults."""
 
 import pickle
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -50,6 +51,28 @@ def test_model_learns_a_smooth_signal_and_reports_uncertainty() -> None:
     assert np.allclose(mean, again, atol=1e-5)
     other, _ = model.predict(series[1], seed=2)
     assert not np.allclose(mean, other)
+
+
+def test_mlp_option_uses_single_samples_and_old_models_stay_lstm() -> None:
+    rng = np.random.default_rng(0)
+    series, targets = [], []
+    for _ in range(8):
+        x = rng.normal(size=(200, 2)).astype(np.float32)
+        series.append(x)
+        targets.append(2.0 * x[:, :1] + 0.05 * rng.normal(size=(200, 1)))
+    cfg = replace(CFG, mcd_epochs=80, mcd_batch=64)  # one sample per window needs more steps
+    model = McdModel(cfg, ["y"], arch="mlp").fit(series, targets, list(range(8)))
+    assert model.lags == 1
+    mean, std = model.predict(series[1], seed=1)
+    assert np.abs(mean[:, 0] - targets[1][:, 0]).mean() < 0.3
+    assert np.all(std > 0.0)
+    clone: McdModel = pickle.loads(pickle.dumps(model))
+    again, _ = clone.predict(series[1], seed=1)
+    assert np.allclose(mean, again, atol=1e-5)
+    old = McdModel(CFG, ["y"])
+    del old.__dict__["arch"]  # a pickle written before the option existed has no such attribute
+    assert old.arch == "lstm"
+    assert old.lags == CFG.mcd_lags
 
 
 @pytest.mark.slow

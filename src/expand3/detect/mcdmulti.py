@@ -102,6 +102,7 @@ class _MultiView:
     """Builds a vehicle's view of the constellation; `comms` picks the variant."""
 
     comms: bool
+    block_key = "measured"  # detectors with a different signal block use their own cache entry
     signals = False      # other vehicles' measured signals are inputs
     own_signals = False  # and the vehicle's own, the literal "all"
     cfg: DetectConfig
@@ -130,6 +131,10 @@ class _MultiView:
             xs.append(x)
         return {ALL: {"cols": cols, "x": xs, "y": ys, "seed": d.seed}}
 
+    def signal_block(self, d: SeedData, sat: str) -> F64:
+        """(n, M) measured signals the other vehicles contribute; a detector may add its own."""
+        return measured_block(d.measurements(sat))
+
     def _seed(self, d: SeedData) -> dict[str, Any]:
         """Per seed: the tick grid, every vehicle's context features, cluster pass flags and
         delivered crosslink messages. Read once and kept on the seed."""
@@ -146,14 +151,16 @@ class _MultiView:
                 feats[s] = x
             assert t is not None
             cache["t"], cache["feats"] = t, feats
-            cache["meas"] = {s: measured_block(d.measurements(s)) for s in feats}
             clusters = self._scenario().clusters
             cache["pass"] = [np.any([d.measurements(s)["gate_pass"] > 0.5
                                      for s in c if s in feats], axis=0) for c in clusters]
-            link = d.table("crosslink", ["t_s", "sender", "receiver", "delivered"])
+            link = d.table("crosslink", ["t_s", "sender", "receiver", "sent", "delivered"])
             sender, receiver = (np.asarray(link.column(c)) for c in ("sender", "receiver"))
             t_link = np.asarray(link.column("t_s"), dtype=np.float64)
             ok = np.asarray(link.column("delivered"), dtype=bool)
+            sent_flag = np.asarray(link.column("sent"), dtype=bool) if "sent" in link.column_names \
+                else np.ones(len(ok), dtype=bool)
+            sent: dict[tuple[str, str], BoolArr] = {}
             delivered: dict[tuple[str, str], BoolArr] = {}
             for a in feats:
                 for b in feats:
@@ -161,7 +168,13 @@ class _MultiView:
                     mask = np.zeros(len(t), dtype=bool)
                     mask[np.searchsorted(t, t_link[sel])] = ok[sel]
                     delivered[(a, b)] = mask
-            cache["delivered"] = delivered
+                    flag = np.zeros(len(t), dtype=bool)
+                    flag[np.searchsorted(t, t_link[sel])] = sent_flag[sel]
+                    sent[(a, b)] = flag
+            cache["delivered"], cache["sent"] = delivered, sent
+        meas: dict[str, dict[str, F64]] = cache.setdefault("meas", {})
+        if self.block_key not in meas:
+            meas[self.block_key] = {s: self.signal_block(d, s) for s in cache["feats"]}
         return cache
 
     def inputs(self, d: SeedData, sat: str) -> tuple[F64, F64]:
@@ -186,7 +199,7 @@ class _MultiView:
                 age[s] = np.where(idx[s] >= 0, (ticks - idx[s]) * dt, np.inf)
         bus = {s: float(b == "B") for s, b in sc.bus_of.items()}
         x = assemble(feats, idx, age, slot_order(sat, sc.clusters), bus, self.cfg.mcdm_age_cap_s,
-                     seed["meas"] if self.signals else None, sat, self.own_signals)
+                     seed["meas"][self.block_key] if self.signals else None, sat, self.own_signals)
         return t, x
 
 

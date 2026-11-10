@@ -1,0 +1,350 @@
+"""Monte Carlo dropout detectors for the faults that are not smooth signals (extra `detect-dl`).
+
+`mcdrop.py` forecasts a continuous measured signal with a dropout LSTM. F2 is still that kind of
+signal (string power while sunlit) and keeps the LSTM. The rest are events, counts or one value per
+take, so a dropout MLP predicts the expected quantity of each sample from exogenous inputs, the
+spread of its stochastic passes plus an aleatoric term fitted on held-out seeds is its uncertainty,
+and the GLR that fits the quantity scores the miss:
+
+- F3, F4: per slew step and wheel, the momentum change. A healthy wheel has dh = u dt (Model:
+  actuators, k = 1, c = 0), so F4 shows as a slope of the miss on the command and F3 as a slope on
+  the momentum, both per wheel.
+- F8: per block of ticks, the fraction of the vehicle's incident messages that dropped (binomial).
+  Like the physics detector, only the vehicle with the largest score can alarm, because a drop on
+  a link counts for both its ends.
+- F9: per block, the upset count while inside the SAA (Poisson). The expected count is the
+  network's mean plus its epistemic std.
+- F10: per take, log2 of the dark current from the payload temperature (Gaussian, one sample).
+
+Each has the single-vehicle form (the vehicle's own context features and its own inputs) and, with
+`_sig`, the multi-satellite form of `mcdmulti.py`: the context of all six vehicles and the other
+five vehicles' measured signals, the vehicle's own masked; `_sig_comms` through the crosslink and
+ground relay. For F8 and F9 the same-kind signal of a peer (its recent drop fraction, its recent
+upsets) is added to what the peers contribute. A sample's inputs come from the tick at or before
+its time.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field, replace
+from typing import Any
+
+import numpy as np
+from numpy.typing import NDArray
+
+from expand3.detect.base import Detector, Trace
+from expand3.detect.data import SeedData
+from expand3.detect.features import context, sunlit
+from expand3.detect.glr import binomial_glr, gaussian_glr, poisson_glr, slope_glr
+from expand3.detect.mcdmulti import ALL, _MultiView, measured_block
+from expand3.detect.mcdrop import McdModel, McdThermal
+
+F64 = NDArray[np.float64]
+F32 = NDArray[np.float32]
+IntArr = NDArray[np.int64]
+N_WHEELS = 4
+N_STRINGS = 4
+
+
+def blocks(n: int, stride: int) -> tuple[IntArr, IntArr]:
+    """First and last tick of each block of `stride` ticks; the last block may be partial."""
+    start = np.arange(0, n, stride, dtype=np.int64)
+    return start, np.minimum(start + stride, n) - 1
+
+
+def trailing_sum(x: F64, window: int) -> F64:
+    """Sum of the last `window` values at each tick (fewer at the start); uses no later tick."""
+    c = np.cumsum(x)
+    out = np.array(c, dtype=np.float64)
+    out[window:] -= c[:-window]
+    return out
+
+
+@dataclass
+class Samples:
+    """One vehicle's samples of one fault: times, the tick at or before each, the fault's own
+    inputs, targets (NaN where not usable) and per-sample arrays the score needs."""
+
+    t: F64
+    tick: IntArr
+    local: F64
+    y: F64
+    aux: dict[str, F64] = field(default_factory=dict)
+
+
+def _empty(k: int, n_local: int) -> Samples:
+    return Samples(np.zeros(0), np.zeros(0, dtype=np.int64), np.zeros((0, n_local)),
+                   np.zeros((0, k)))
+
+
+class _Nn(_MultiView, Detector):
+    """Shared plumbing: samples, inputs, one shared MLP for all vehicles, traces."""
+
+    family = "bayesian"
+    comms = False
+    cols: tuple[str, ...] = ()
+    overrides: tuple[tuple[str, Any], ...] = ()  # DetectConfig fields for this fault's model
+
+    def samples(self, d: SeedData, sat: str) -> Samples:
+        raise NotImplementedError
+
+    def score(self, d: SeedData, per: dict[str, tuple[Samples, F64, F64]]) -> list[Trace]:
+        raise NotImplementedError
+
+    def x(self, d: SeedData, sat: str, s: Samples) -> F32:
+        if self.signals:
+            _, base = self.inputs(d, sat)
+        else:
+            _, base, _ = context(d, sat, self.cfg)
+        return np.concatenate([base[s.tick], s.local], axis=1).astype(np.float32)
+
+    def summarize(self, d: SeedData) -> dict[str, Any]:
+        xs, ys = [], []
+        for sat in d.sat_ids:
+            s = self.samples(d, sat)
+            if len(s.t):
+                ok = d.fault_free(sat, s.t)
+                xs.append(self.x(d, sat, s))
+                ys.append(np.where(ok[:, None], s.y, np.nan))
+        return {"x": xs, "y": ys, "seed": d.seed}
+
+    def fit(self, summaries: list[dict[str, Any]]) -> dict[str, Any]:
+        xs = [x for s in summaries for x in s["x"]]
+        ys = [y for s in summaries for y in s["y"]]
+        seeds = [s["seed"] for s in summaries for _ in s["x"]]
+        cfg = replace(self.cfg, **dict(self.overrides))
+        return {ALL: McdModel(cfg, list(self.cols), arch="mlp").fit(xs, ys, seeds)}
+
+    def traces(self, d: SeedData, nominal: dict[str, Any]) -> list[Trace]:
+        model: McdModel = nominal[ALL]
+        per: dict[str, tuple[Samples, F64, F64]] = {}
+        for sat in d.sat_ids:
+            s = self.samples(d, sat)
+            if len(s.t):
+                mean, std = model.predict(self.x(d, sat, s), d.seed)
+                per[sat] = (s, mean, std)
+        return self.score(d, per)
+
+
+# ---- F9: upsets while inside the SAA ---------------------------------------------------------
+class McdUpsets(_Nn):
+    name = "mcdn_f9"
+    fault_ids = ("F9",)
+    block_key = "f9"
+    cols = ("upsets_per_block",)
+    overrides = (("mcd_epochs", 60),)
+
+    def signal_block(self, d: SeedData, sat: str) -> F64:
+        m = d.measurements(sat)
+        recent = trailing_sum(np.nan_to_num(m["upsets"]), self.cfg.mcd_stride)
+        return np.concatenate([measured_block(m), recent[:, None]], axis=1)
+
+    def samples(self, d: SeedData, sat: str) -> Samples:
+        m = d.measurements(sat)
+        n = len(m["t_s"])
+        start, end = blocks(n, self.cfg.mcd_stride)
+        length = np.add.reduceat(np.ones(n), start)
+        counts = np.add.reduceat(np.nan_to_num(m["upsets"]), start)
+        inside = np.add.reduceat((m["gate_saa"] > 0.5).astype(np.float64), start)
+        field_nt = np.add.reduceat(np.nan_to_num(m["field_nT"]), start) / length
+        y = np.where(inside > 0, counts, np.nan)[:, None]
+        return Samples(m["t_s"][end], end, np.stack([inside / length, field_nt], axis=1), y,
+                       {"inside": inside, "counts": counts})
+
+    def score(self, d: SeedData, per: dict[str, tuple[Samples, F64, F64]]) -> list[Trace]:
+        cfg = self.cfg
+        out = []
+        for sat, (s, mean, std) in per.items():
+            sel = s.aux["inside"] > 0
+            if not sel.any():
+                continue
+            dt = float(np.median(np.diff(d.measurements(sat)["t_s"])))
+            floor = cfg.f9_lambda_floor_per_s * dt * s.aux["inside"]
+            expected = np.maximum(mean[:, 0] + std[:, 0], floor)
+            out.append(Trace(sat, "F9", s.t[sel], poisson_glr(s.aux["counts"][sel],
+                                                             expected[sel], cfg.mcd_window)))
+        return out
+
+
+# ---- F8: dropped messages --------------------------------------------------------------------
+def _incident(cache: dict[str, Any], sat: str, n: int) -> tuple[F64, F64]:
+    """Per tick: messages sent on the vehicle's links, and how many of them dropped."""
+    sent = np.zeros(n)
+    dropped = np.zeros(n)
+    for other in cache["feats"]:
+        if other == sat:
+            continue
+        for key in ((sat, other), (other, sat)):
+            sent += cache["sent"][key]
+            dropped += cache["sent"][key] & ~cache["delivered"][key]
+    return sent, dropped
+
+
+class McdDrops(_Nn):
+    name = "mcdn_f8"
+    fault_ids = ("F8",)
+    block_key = "f8"
+    cols = ("drop_fraction",)
+    overrides = (("mcd_epochs", 60),)
+
+    def signal_block(self, d: SeedData, sat: str) -> F64:
+        cache = d.__dict__["_mcdm_cache"]  # built before the blocks are
+        sent, dropped = _incident(cache, sat, len(cache["t"]))
+        window = self.cfg.mcd_stride
+        recent = trailing_sum(dropped, window) / np.maximum(trailing_sum(sent, window), 1.0)
+        return np.concatenate([measured_block(d.measurements(sat)), recent[:, None]], axis=1)
+
+    def samples(self, d: SeedData, sat: str) -> Samples:
+        cache = self._seed(d)
+        t = cache["t"]
+        start, end = blocks(len(t), self.cfg.mcd_stride)
+        sent_t, dropped_t = _incident(cache, sat, len(t))
+        sent = np.add.reduceat(sent_t, start)
+        dropped = np.add.reduceat(dropped_t, start)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            y = np.where(sent > 0, dropped / sent, np.nan)[:, None]
+        return Samples(t[end], end, (sent / self.cfg.mcd_stride)[:, None], y,
+                       {"sent": sent, "dropped": dropped})
+
+    def score(self, d: SeedData, per: dict[str, tuple[Samples, F64, F64]]) -> list[Trace]:
+        cfg = self.cfg
+        score: dict[str, F64] = {}
+        for sat, (s, mean, std) in per.items():
+            seen = s.aux["sent"] > 0
+            p0 = float(np.clip(np.median((mean[:, 0] + std[:, 0])[seen]) if seen.any() else 0.0,
+                               cfg.f8_p0_floor, 1.0))
+            score[sat] = binomial_glr(s.aux["dropped"], s.aux["sent"], p0, cfg.mcd_window)
+        best = np.max(np.stack(list(score.values())), axis=0)  # as the physics detector: a
+        return [Trace(sat, "F8", per[sat][0].t, np.where(v >= best, v, 0.0))  # drop counts at both
+                for sat, v in score.items()]                                 # ends of a link
+
+
+# ---- F10: dark current at the take -----------------------------------------------------------
+class McdDark(_Nn):
+    name = "mcdn_f10"
+    fault_ids = ("F10",)
+    block_key = "f10"
+    cols = ("log2_dark_current",)
+    overrides = (("mcd_epochs", 300), ("mcd_batch", 32))
+
+    def samples(self, d: SeedData, sat: str) -> Samples:
+        c = d.sat_columns("takes", sat, ["t_take_s", "payload_K", "dark_current_e_s_px"])
+        t_take = np.asarray(c["t_take_s"], dtype=np.float64)
+        if not t_take.size:
+            return _empty(1, 1)
+        grid = d.measurements(sat)["t_s"]
+        tick = np.maximum(np.searchsorted(grid, t_take, side="right") - 1, 0)
+        y = np.log2(np.asarray(c["dark_current_e_s_px"], dtype=np.float64))[:, None]
+        return Samples(t_take, tick.astype(np.int64),
+                       np.asarray(c["payload_K"], dtype=np.float64)[:, None], y)
+
+    def score(self, d: SeedData, per: dict[str, tuple[Samples, F64, F64]]) -> list[Trace]:
+        return [Trace(sat, "F10", s.t, gaussian_glr((s.y[:, 0] - mean[:, 0]) / std[:, 0],
+                                                   0.0, 1.0, 1))
+                for sat, (s, mean, std) in per.items()]
+
+
+# ---- F3, F4: wheel momentum steps ------------------------------------------------------------
+class McdWheels(_Nn):
+    name = "mcdn_wheels"
+    fault_ids = ("F3", "F4")
+    block_key = "wheels"
+    cols = tuple(f"wheel_{j + 1}_dh_per_s" for j in range(N_WHEELS))
+    overrides = (("mcd_epochs", 100), ("mcd_sigma_floor", 1e-12))
+
+    def samples(self, d: SeedData, sat: str) -> Samples:
+        names = ["slew", "t_s", *[f"h_{j + 1}_Nms" for j in range(N_WHEELS)],
+                 *[f"u_{j + 1}_Nm" for j in range(N_WHEELS)]]
+        c = d.sat_columns("wheel_steps", sat, names)
+        rows: list[tuple[F64, F64, F64, F64]] = []
+        for slew in np.unique(c["slew"]):
+            sel = np.flatnonzero(c["slew"] == slew)
+            sel = sel[np.argsort(np.asarray(c["t_s"], dtype=np.float64)[sel], kind="stable")]
+            if sel.size < 2:
+                continue
+            t = np.asarray(c["t_s"], dtype=np.float64)[sel]
+            h = np.stack([np.asarray(c[f"h_{j + 1}_Nms"], dtype=np.float64)[sel]
+                          for j in range(N_WHEELS)], axis=1)
+            u = np.stack([np.asarray(c[f"u_{j + 1}_Nm"], dtype=np.float64)[sel]
+                          for j in range(N_WHEELS)], axis=1)
+            dt = np.diff(t)[:, None]
+            rows.append((t[1:], (h[:-1] - h[1:]) / dt, u[1:], h[:-1]))
+        if not rows:
+            return _empty(N_WHEELS, 2 * N_WHEELS)
+        rows.sort(key=lambda r: r[0][0])
+        t, y, u, h_prev = (np.concatenate([r[i] for r in rows]) for i in range(4))
+        grid = d.measurements(sat)["t_s"]
+        tick = np.maximum(np.searchsorted(grid, t, side="right") - 1, 0).astype(np.int64)
+        return Samples(t, tick, np.concatenate([u, h_prev], axis=1), y,
+                       {"u": u, "h_prev": h_prev})
+
+    def score(self, d: SeedData, per: dict[str, tuple[Samples, F64, F64]]) -> list[Trace]:
+        out = []
+        for sat, (s, mean, std) in per.items():
+            z = np.nan_to_num((s.y - mean) / std)
+            for fid, key in (("F4", "u"), ("F3", "h_prev")):
+                per_wheel = np.stack([slope_glr(z[:, j], s.aux[key][:, j], 1.0,
+                                                self.cfg.nn_wheel_window)
+                                      for j in range(N_WHEELS)], axis=1)
+                detail = np.array([f"wheel_{int(j) + 1}" for j in per_wheel.argmax(axis=1)],
+                                  dtype="U16")
+                out.append(Trace(sat, fid, s.t, per_wheel.max(axis=1), detail))
+        return out
+
+
+# ---- F2: string power, an LSTM like the thermal detectors ------------------------------------
+class McdStrings(_MultiView, McdThermal):
+    """F2: each string's power while sunlit, scored for a drop."""
+
+    name = "mcd_f2"
+    fault_ids = ("F2",)
+    comms = False
+
+    def _buses(self) -> dict[str, str]:
+        return _MultiView._buses(self) if self.signals else McdThermal._buses(self)
+
+    def summarize(self, d: SeedData) -> dict[str, Any]:
+        # one shared model with the other vehicles, one per bus alone, as the thermal detectors
+        return _MultiView.summarize(self, d) if self.signals else McdThermal.summarize(self, d)
+
+    def series(self, d: SeedData, sat: str) -> tuple[F64, F32, dict[str, F64], F64]:
+        step = self.cfg.mcd_stride
+        if self.signals:
+            t, x = self.inputs(d, sat)
+        else:
+            t, x, _ = context(d, sat, self.cfg)
+        m = d.measurements(sat)
+        sun = sunlit(m, self.cfg) > 0
+        y = {c: np.where(sun, m[c], np.nan)[::step] for c in
+             (f"string_p_{i + 1}_W_meas" for i in range(N_STRINGS)) if not np.all(np.isnan(m[c]))}
+        return t[::step], x[::step].astype(np.float32), y, np.zeros(len(t[::step]))
+
+    def traces(self, d: SeedData, nominal: dict[str, Any]) -> list[Trace]:
+        buses = self._buses()
+        out = []
+        for sat in d.sat_ids:
+            model: McdModel = nominal[buses[sat]]
+            t, x, y, _ = self.series(d, sat)
+            mean, std = model.predict(x, d.seed)
+            for k, c in enumerate(model.columns):
+                if c not in y:
+                    continue
+                r = (y[c] - mean[:, k]) / std[:, k]
+                sel = np.isfinite(r)
+                score = gaussian_glr(r[sel], 0.0, 1.0, self.cfg.mcd_window, side="down")
+                out.append(Trace(sat, "F2", t[sel], score,
+                                 np.full(int(sel.sum()), f"string_{c.split('_')[2]}", dtype="U16")))
+        return out
+
+
+def _variants(base: Any) -> dict[str, type[Detector]]:
+    """The detector alone, with the other vehicles' signals at once, and through the links."""
+    sig: Any = type(f"{base.__name__}Sig", (base,), {"signals": True, "name": f"{base.name}_sig"})
+    comms: Any = type(f"{base.__name__}SigComms", (sig,),
+                 {"comms": True, "name": f"{base.name}_sig_comms"})
+    return {c.name: c for c in (base, sig, comms)}
+
+
+MCDN: dict[str, type[Detector]] = {
+    k: v for base in (McdStrings, McdDrops, McdUpsets, McdDark, McdWheels)
+    for k, v in _variants(base).items()}

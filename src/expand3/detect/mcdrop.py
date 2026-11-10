@@ -54,8 +54,22 @@ def pick_device(cfg: DetectConfig) -> Any:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def _network(torch: Any, n_in: int, n_out: int, cfg: DetectConfig) -> Any:
+def _network(torch: Any, n_in: int, n_out: int, cfg: DetectConfig, arch: str = "lstm") -> Any:
     nn = torch.nn
+
+    if arch == "mlp":
+        class Mlp(torch.nn.Module):  # type: ignore[misc]
+            def __init__(self) -> None:
+                super().__init__()
+                h, p = cfg.mcd_hidden, cfg.mcd_dropout
+                self.body = nn.Sequential(nn.Linear(n_in, h), nn.ReLU(), nn.Dropout(p),
+                                          nn.Linear(h, h), nn.ReLU(), nn.Dropout(p),
+                                          nn.Linear(h, n_out))
+
+            def forward(self, x: Any) -> Any:
+                return self.body(x[:, -1])  # one sample per window
+
+        return Mlp()
 
     class Net(torch.nn.Module):  # type: ignore[misc]
         def __init__(self) -> None:
@@ -81,8 +95,11 @@ def _windows(x: F32, rows: NDArray[np.int_], start: NDArray[np.int_], lags: int)
 class McdModel:
     """A dropout LSTM and its calibration. `predict` returns the mean and the predictive std."""
 
-    def __init__(self, cfg: DetectConfig, columns: list[str]) -> None:
+    arch = "lstm"  # class default, so models pickled before the option still load as LSTMs
+
+    def __init__(self, cfg: DetectConfig, columns: list[str], arch: str = "lstm") -> None:
         self.cfg = cfg
+        self.arch = arch
         self.columns = columns
         self.net: Any = None
         self.n_in = 0
@@ -93,6 +110,11 @@ class McdModel:
         self.y_sd: F64 = np.ones(0)
         self.sigma_ale: F64 = np.zeros(0)
         self.coverage: float = float("nan")
+
+    @property
+    def lags(self) -> int:
+        """Window length: the LSTM's, or a single sample for the MLP."""
+        return self.cfg.mcd_lags if self.arch == "lstm" else 1
 
     def __getstate__(self) -> dict[str, Any]:
         """The network class is local to `_network`, so pickle its weights and rebuild it."""
@@ -105,7 +127,7 @@ class McdModel:
     def _network(self, n_out: int) -> Any:
         if self.net is None:
             assert self.state is not None
-            self.net = _network(_torch(), self.n_in, n_out, self.cfg)
+            self.net = _network(_torch(), self.n_in, n_out, self.cfg, self.arch)
             self.net.load_state_dict(self.state)
         return self.net
 
@@ -148,7 +170,7 @@ class McdModel:
         torch.manual_seed(cfg.random_seed)
         rng = np.random.default_rng(cfg.random_seed)
         self.n_in = xs.shape[1]
-        net = _network(torch, self.n_in, ys.shape[1], cfg).to(device)
+        net = _network(torch, self.n_in, ys.shape[1], cfg, self.arch).to(device)
         opt = torch.optim.Adam(net.parameters(), lr=cfg.mcd_lr, weight_decay=cfg.mcd_weight_decay)
         y_t = torch.from_numpy(np.nan_to_num(ys))
         ok_t = torch.from_numpy(np.isfinite(ys).astype(np.float32))
@@ -157,7 +179,7 @@ class McdModel:
             order = rng.permutation(train_rows)[: cfg.mcd_max_rows]
             for b in range(0, len(order), cfg.mcd_batch):
                 rows = order[b: b + cfg.mcd_batch]
-                xb = torch.from_numpy(_windows(xs, rows, start, cfg.mcd_lags)).to(device)
+                xb = torch.from_numpy(_windows(xs, rows, start, self.lags)).to(device)
                 err = (net(xb) - y_t[rows].to(device)) * ok_t[rows].to(device)
                 loss = (err ** 2).sum() / ok_t[rows].sum().clamp(min=1.0).to(device)
                 opt.zero_grad()
@@ -192,7 +214,7 @@ class McdModel:
         with torch.no_grad():
             for b in range(0, len(rows), PREDICT_BATCH):
                 sel = rows[b: b + PREDICT_BATCH]
-                xb = torch.from_numpy(_windows(xs, sel, start, cfg.mcd_lags)).to(device)
+                xb = torch.from_numpy(_windows(xs, sel, start, self.lags)).to(device)
                 passes = torch.stack([net(xb) for _ in range(cfg.mcd_samples)]).cpu().numpy()
                 mean[b: b + len(sel)] = passes.mean(axis=0)
                 var[b: b + len(sel)] = passes.var(axis=0)
