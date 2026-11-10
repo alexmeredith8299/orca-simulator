@@ -21,6 +21,7 @@ and model error. Training is on nominal data only, with separate models per bus.
 
 from __future__ import annotations
 
+import warnings
 from typing import Any
 
 import numpy as np
@@ -108,6 +109,11 @@ class McdModel:
             self.net.load_state_dict(self.state)
         return self.net
 
+    def _standardize(self, x: F32) -> F32:
+        """Standardized inputs; a missing input is zero, the training mean."""
+        z = ((x - self.x_mu) / self.x_sd).astype(np.float32)
+        return np.nan_to_num(z, nan=0.0) if np.isnan(z).any() else z
+
     # ---- training -------------------------------------------------------------------------
     def fit(self, series: list[F32], targets: list[F64], seeds: list[int]) -> McdModel:
         """`series[i]` is (n_i, F) inputs, `targets[i]` (n_i, K) with NaN where not usable."""
@@ -121,11 +127,17 @@ class McdModel:
         start = np.concatenate([np.full(len(s), off) for s, off in
                                 zip(series, np.cumsum([0, *[len(s) for s in series[:-1]]]),
                                     strict=True)]).astype(np.int64)
-        self.x_mu = x.mean(axis=0)
-        self.x_sd = np.where(x.std(axis=0) > 0, x.std(axis=0), 1.0).astype(np.float32)
+        if np.isnan(x).any():  # inputs not yet received; filled with the training mean below
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                self.x_mu = np.nan_to_num(np.nanmean(x, axis=0)).astype(np.float32)
+                sd = np.nan_to_num(np.nanstd(x, axis=0))
+        else:
+            self.x_mu, sd = x.mean(axis=0), x.std(axis=0)
+        self.x_sd = np.where(sd > 0, sd, 1.0).astype(np.float32)
         self.y_mu = np.nanmean(y, axis=0)
         self.y_sd = np.maximum(np.nanstd(y, axis=0), cfg.mcd_sigma_floor)
-        xs = ((x - self.x_mu) / self.x_sd).astype(np.float32)
+        xs = self._standardize(x)
         ys = ((y - self.y_mu) / self.y_sd).astype(np.float32)
         usable = np.any(np.isfinite(ys), axis=1)
         val = (g % cfg.mcd_val_mod == 0) & usable
@@ -194,7 +206,7 @@ class McdModel:
         torch.set_num_threads(1 if pick_device(cfg).type == "cpu" else cfg.mcd_threads)
         self._network(len(self.columns))  # build before seeding: its init draws random numbers
         torch.manual_seed(cfg.random_seed + seed)
-        xs = ((x - self.x_mu) / self.x_sd).astype(np.float32)
+        xs = self._standardize(x)
         rows = np.arange(len(xs))
         mean, var_e = self._mc(xs, rows, np.zeros(len(xs), dtype=np.int64))
         std = np.sqrt(self.sigma_ale ** 2 + var_e) * self.y_sd

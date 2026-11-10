@@ -17,7 +17,11 @@ its bus flag. Two variants:
   slot not yet received is zero with its age at the cap.
 
 The measured inputs of the F1 model (current, SoC estimate and battery temperature) are the
-vehicle's own and always current. No other vehicle's measured signal is an input.
+vehicle's own and always current. In the `_sig` variants the other vehicles' measured signals are
+inputs too, held and aged like their features. The vehicle's own signals are not: its slot has no
+signal block, in training or in testing, so the network cannot extrapolate the signal it
+predicts (a slow fault would then look like the trend continuing). `_all` keeps them, to measure
+that effect.
 
 Detectors read batch outputs only, and take the clusters and buses from the parameters.
 """
@@ -33,7 +37,7 @@ from expand3.detect.base import Detector
 from expand3.detect.comms import hold, relay_source
 from expand3.detect.config import DetectConfig
 from expand3.detect.data import SeedData
-from expand3.detect.features import context, node_columns
+from expand3.detect.features import N_STRINGS, context, node_columns
 from expand3.detect.learned import _voltage_inputs
 from expand3.detect.mcdrop import McdEps, McdThermal
 from expand3.params import load_params
@@ -53,29 +57,53 @@ def slot_order(sat: str, clusters: list[list[str]]) -> list[str]:
 
 
 def assemble(feats: dict[str, F64], idx: dict[str, IntArr], age_s: dict[str, F64],
-             order: list[str], bus_flag: dict[str, float], cap_s: float) -> F64:
+             order: list[str], bus_flag: dict[str, float], cap_s: float,
+             meas: dict[str, F64] | None = None, self_sat: str | None = None,
+             own_meas: bool = False) -> F64:
     """(n, slots x (F + 2)) input: per slot the held features, age / cap (at most 1), bus flag.
 
     `idx[s]` is the tick of `s` held at each tick (-1 before anything arrived, which reads as zero
     features at the cap). A vehicle in `order` without data is a slot of zeros at the cap.
+
+    With `meas`, a slot also holds the vehicle's held measured signals after its features, NaN
+    where nothing has arrived, the vehicle is absent or the bus has no such sensor. `self_sat`'s
+    own signals are left out unless `own_meas`: its slot has no such block, so the network never
+    sees the signal it predicts (in training or in testing).
     """
     n, width = next(iter(feats.values())).shape
     cols: list[F64] = []
     for s in order:
-        if s in feats:
-            held = np.where((idx[s] >= 0)[:, None], feats[s][np.maximum(idx[s], 0)], 0.0)
+        has = s in feats
+        got = has & (idx[s] >= 0) if has else np.zeros(n, dtype=bool)
+        if has:
+            held = np.where(got[:, None], feats[s][np.maximum(idx[s], 0)], 0.0)
             age = np.minimum(age_s[s], cap_s) / cap_s
-            bus = bus_flag[s]
         else:
-            held, age, bus = np.zeros((n, width)), np.ones(n), 0.0
-        cols += [held, age[:, None], np.full((n, 1), bus)]
+            held, age = np.zeros((n, width)), np.ones(n)
+        cols.append(held)
+        if meas is not None and (s != self_sat or own_meas):
+            m = next(iter(meas.values())).shape[1]
+            cols.append(np.where(got[:, None], meas[s][np.maximum(idx[s], 0)], np.nan)
+                        if has else np.full((n, m), np.nan))
+        cols += [age[:, None], np.full((n, 1), bus_flag[s] if has else 0.0)]
     return np.concatenate(cols, axis=1)
+
+
+def measured_block(m: dict[str, F64]) -> F64:
+    """(n, M) measured signals of a vehicle: pack voltage and current, SoC estimate, the string
+    powers and every thermistor, in a fixed order. NaN where the vehicle has no such sensor."""
+    names = ["pack_v_V_meas", "pack_i_A_meas", "soc_est_meas",
+             *[f"string_p_{k + 1}_W_meas" for k in range(N_STRINGS)],
+             *sorted(c for c in m if c.startswith("T_") and c.endswith("_K_meas"))]
+    return np.stack([m[c] for c in names], axis=1)
 
 
 class _MultiView:
     """Builds a vehicle's view of the constellation; `comms` picks the variant."""
 
     comms: bool
+    signals = False      # other vehicles' measured signals are inputs
+    own_signals = False  # and the vehicle's own, the literal "all"
     cfg: DetectConfig
     params_dir: str | None
 
@@ -85,6 +113,22 @@ class _MultiView:
 
     def _buses(self) -> dict[str, str]:
         return {s: ALL for c in self._scenario().clusters for s in c}
+
+    def series(self, d: SeedData, sat: str) -> tuple[F64, F32, dict[str, F64], F64]:
+        raise NotImplementedError
+
+    def summarize(self, d: SeedData) -> dict[str, Any]:
+        """One model for all vehicles, so each vehicle's targets are padded with NaN to the
+        columns of the seed (a Bus B vehicle lacks a thermistor that a Bus A vehicle has)."""
+        views = {sat: self.series(d, sat) for sat in d.sat_ids}
+        cols = sorted({c for _, _, y, _ in views.values() for c in y})
+        xs, ys = [], []
+        for sat, (t, x, y, _) in views.items():
+            ok = d.fault_free(sat, t)
+            ys.append(np.stack([np.where(ok, y[c], np.nan) if c in y else np.full(len(t), np.nan)
+                                for c in cols], axis=1))
+            xs.append(x)
+        return {ALL: {"cols": cols, "x": xs, "y": ys, "seed": d.seed}}
 
     def _seed(self, d: SeedData) -> dict[str, Any]:
         """Per seed: the tick grid, every vehicle's context features, cluster pass flags and
@@ -102,6 +146,7 @@ class _MultiView:
                 feats[s] = x
             assert t is not None
             cache["t"], cache["feats"] = t, feats
+            cache["meas"] = {s: measured_block(d.measurements(s)) for s in feats}
             clusters = self._scenario().clusters
             cache["pass"] = [np.any([d.measurements(s)["gate_pass"] > 0.5
                                      for s in c if s in feats], axis=0) for c in clusters]
@@ -140,7 +185,8 @@ class _MultiView:
                 idx[s] = relay_source(seed["pass"][cluster_of[s]], seed["pass"][cluster_of[sat]])
                 age[s] = np.where(idx[s] >= 0, (ticks - idx[s]) * dt, np.inf)
         bus = {s: float(b == "B") for s, b in sc.bus_of.items()}
-        x = assemble(feats, idx, age, slot_order(sat, sc.clusters), bus, self.cfg.mcdm_age_cap_s)
+        x = assemble(feats, idx, age, slot_order(sat, sc.clusters), bus, self.cfg.mcdm_age_cap_s,
+                     seed["meas"] if self.signals else None, sat, self.own_signals)
         return t, x
 
 
@@ -184,5 +230,37 @@ class McdMultiEpsComms(McdMultiEps):
     name = "mcdm_eps_comms"
 
 
+class McdMultiThermalSig(McdMultiThermal):
+    signals = True
+    name = "mcdm_thermal_sig"
+
+
+class McdMultiEpsSig(McdMultiEps):
+    signals = True
+    name = "mcdm_eps_sig"
+
+
+class McdMultiThermalSigComms(McdMultiThermalSig):
+    comms = True
+    name = "mcdm_thermal_sig_comms"
+
+
+class McdMultiEpsSigComms(McdMultiEpsSig):
+    comms = True
+    name = "mcdm_eps_sig_comms"
+
+
+class McdMultiThermalAll(McdMultiThermalSig):
+    own_signals = True
+    name = "mcdm_thermal_all"
+
+
+class McdMultiEpsAll(McdMultiEpsSig):
+    own_signals = True
+    name = "mcdm_eps_all"
+
+
 MCDM: dict[str, type[Detector]] = {c.name: c for c in (
-    McdMultiThermal, McdMultiEps, McdMultiThermalComms, McdMultiEpsComms)}
+    McdMultiThermal, McdMultiEps, McdMultiThermalComms, McdMultiEpsComms,
+    McdMultiThermalSig, McdMultiEpsSig, McdMultiThermalSigComms, McdMultiEpsSigComms,
+    McdMultiThermalAll, McdMultiEpsAll)}
