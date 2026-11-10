@@ -81,6 +81,7 @@ class DetectConfig:
     mcd_threads: int = 8
     mcd_sigma_floor: float = 1e-3
     mcd_device: str = "auto"
+    mcdm_age_cap_s: float = 10800.0
     # raw-signal classifier: trailing windows over the measured signals
     raw_windows_s: tuple[float, ...] = (3600.0, 21600.0)
     raw_count_windows_s: tuple[float, ...] = (21600.0, 86400.0, 1e12)
