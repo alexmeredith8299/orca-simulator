@@ -30,7 +30,7 @@ from expand3.env.eclipse import shadow_fraction
 from expand3.env.frames import eci_to_ecef
 from expand3.env.ground import Station, elevation_deg, stations
 from expand3.env.sun import sun_eci
-from expand3.faults import FaultConfig, FaultLabel, Injector, draw_fault
+from expand3.faults import FaultConfig, FaultLabel, Injector, draw_fault, draw_fault_extended
 from expand3.links import CrosslinkLog, crosslink
 from expand3.mission import pointing
 from expand3.mission.burns import BurnController, BurnRecord, plan_burns
@@ -677,13 +677,18 @@ def _fault_setup(
     run."""
     if cfg.mode == "none":
         return None
-    fid, lead = draw_fault(params, draws.seed)
+    profile = None
+    if cfg.fault_set == "extended":
+        fid, lead, profile = draw_fault_extended(params, draws.seed)
+    else:
+        fid, lead = draw_fault(params, draws.seed)
     if cfg.mode == "forced":
         if cfg.fault_id is None:
             raise ValueError("a forced fault needs fault_id")
         fid = cfg.fault_id
         lead = lead if cfg.lead_s is None else cfg.lead_s
-    sat = params.faults.faults[fid].vehicle
+        profile = cfg.profile
+    sat = params.fault(fid).vehicle
     view = ParamView(params, sat)
     view.overrides.update(overrides.get(sat, {}))
     model = OrbitModel.from_params(params, [sat], draws, pole, Forces())
@@ -694,7 +699,7 @@ def _fault_setup(
     plan = _plan_take(view, 0, t, clock.tick_s, clock.step_s, traj, rot, sun_u, sun_ecef)
     if plan is None:
         return None
-    return Injector(params, fid, plan.t_take - lead, lead, clock.tick_s)
+    return Injector(params, fid, plan.t_take - lead, lead, clock.tick_s, profile, draws.seed)
 
 
 def _coast(view: ParamView, h: F64, t_from: float, t_to: float, tick: float) -> F64:

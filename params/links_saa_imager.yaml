@@ -14,3 +14,7 @@ signals:
   string_power: {rate_s: 30, rel_sigma: 0.01}
   node_temperature: {rate_s: 30, sigma_K: 0.5}
   tank_gauge: {rate_s: 30, sigma_kg: 0.1}
+# Nominal (inactive) values of the sensor fault parameters of the extended faults
+# (docs/extended-faults-plan.md, Phase A). Not in the spec; a fault moves one of them.
+sensor_faults:
+  imu: {bias_rad_s: 0.0, scale: 1.0, noise_mult: 1.0, stuck: 0.0}

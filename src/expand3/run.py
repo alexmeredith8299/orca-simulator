@@ -27,7 +27,7 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any
 
-from expand3.faults import FaultConfig, draw_fault
+from expand3.faults import FaultConfig, draw_fault, draw_fault_extended
 from expand3.mission.thread import run_mission
 from expand3.params import load_params
 from expand3.recorder import write_run
@@ -105,6 +105,7 @@ def run_seed(params_dir: Path, seed: int, out: Path, fault: FaultConfig,
         shutil.rmtree(tmp)
     files = write_run(run, params, tmp)
     fault_id, lead = draw_fault(params, seed)
+    drawn_ext, _, drawn_shape = draw_fault_extended(params, seed)
     manifest = {
         "seed": seed,
         "fault_config": dataclasses.asdict(fault),
@@ -119,10 +120,13 @@ def run_seed(params_dir: Path, seed: int, out: Path, fault: FaultConfig,
             "burn_length_s": draws.burn_length_s,
             "fault_id": fault_id,
             "fault_lead_s": lead,
+            "fault_id_extended": drawn_ext,
+            "fault_shape_extended": drawn_shape,
         },
         "fault_applied": None if run.fault is None else {
             "fault_id": run.fault.fault_id, "vehicle": run.fault.vehicle,
-            "lead_s": run.fault.lead_s, "t0_s": run.fault.t0_s, "t_arm_s": run.fault.t_arm_s,
+            "profile": run.fault.profile, "lead_s": run.fault.lead_s,
+            "t0_s": run.fault.t0_s, "t_arm_s": run.fault.t_arm_s,
         },
         "git": git_info(),
         "params_sha256": params_sha256(params_dir),

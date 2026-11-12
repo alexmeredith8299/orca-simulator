@@ -152,11 +152,32 @@ def star_tracker(rng: np.random.Generator, view: ParamView, t_s: F64, q: F64, r_
     return StarTrackerSignal(t_s[m], available, q_meas, qt.copy())
 
 
+def hold_last_healthy(meas: F64, flag: F64) -> F64:
+    """Where `flag` is above one half the reading stops updating: it repeats the last sample
+    taken with the flag down (the first sample if it never was)."""
+    out = np.array(meas, dtype=np.float64)
+    stuck = flag > 0.5
+    if not stuck.any():
+        return out
+    healthy = np.flatnonzero(~stuck)
+    last = np.maximum(np.searchsorted(healthy, np.arange(len(out))) - 1, 0)
+    src = healthy[last] if healthy.size else np.zeros(len(out), dtype=np.int64)
+    out[stuck] = meas[src[stuck]]
+    return out
+
+
 def imu(rng: np.random.Generator, view: ParamView, t_s: F64, omega: F64) -> Sampled:
-    """Spec: body rate + N(0, 5e-5 rad/s), every 30 s."""
+    """Spec: body rate + N(0, 5e-5 rad/s), every 30 s. Extended faults (gyro_bias, gyro_scale,
+    gyro_noise, gyro_stuck): scale x truth + bias + the noise times its multiplier, then frozen."""
     m = every(t_s, view.get("signals.imu.rate_s"))
+    ts = t_s[m]
     noise = rng.normal(0.0, view.get("signals.imu.sigma_rad_s"), (int(m.sum()), 3))
-    return Sampled(t_s[m], omega[m] + noise, omega[m].copy())
+    bias = view.get_series("sensor_faults.imu.bias_rad_s", ts)[:, None]
+    scale = view.get_series("sensor_faults.imu.scale", ts)[:, None]
+    mult = view.get_series("sensor_faults.imu.noise_mult", ts)[:, None]
+    meas = omega[m] * scale + bias + noise * mult
+    meas = hold_last_healthy(meas, view.get_series("sensor_faults.imu.stuck", ts))
+    return Sampled(ts, meas, omega[m].copy())
 
 
 def pack_voltage(rng: np.random.Generator, view: ParamView, t_s: F64, v: F64) -> Sampled:

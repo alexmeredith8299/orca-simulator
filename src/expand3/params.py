@@ -453,8 +453,15 @@ def _apply_bus_b_thermal(thermal_a: Mapping[str, Any], o: BusBThermalOverrides) 
 # --------------------------------------------------------------------------- faults.yaml
 
 
+Profile = Literal["step", "ramp", "exponential", "intermittent"]
+
+
 class Fault(_Model):
-    """theta(t) = theta0 * (1 + (m - 1) * s(t)), or theta = set_to when the nominal is zero."""
+    """theta(t) = theta0 * (1 + (m - 1) * s(t)), or theta = set_to when the nominal is zero.
+
+    The spec's ten use `step` or `ramp`. The extended faults (docs/extended-faults-plan.md) may
+    list several `shapes`, `profile` being the first; `exponential` takes its time constant from
+    `t_r_s` and `intermittent` alternates on and off episodes of mean `t_on_s` and `t_off_s`."""
 
     name: str
     vehicle: SatId
@@ -462,8 +469,11 @@ class Fault(_Model):
     params: list[str] | None = None
     m: float | None = None
     set_to: float | None = None
-    profile: Literal["step", "ramp"]
+    profile: Profile
+    shapes: list[Profile] | None = None
     t_r_s: float | None = None
+    t_on_s: float | None = None
+    t_off_s: float | None = None
     cap: float | None = None
     note: str | None = None
 
@@ -473,8 +483,14 @@ class Fault(_Model):
             raise ValueError("fault needs exactly one of param / params")
         if (self.m is None) == (self.set_to is None):
             raise ValueError("fault needs exactly one of m / set_to")
-        if (self.profile == "ramp") != (self.t_r_s is not None):
-            raise ValueError("t_r_s is required for, and only for, a ramp profile")
+        shapes = set(self.shapes or [self.profile])
+        if self.shapes and self.shapes[0] != self.profile:
+            raise ValueError("profile must be the first of shapes")
+        if (self.t_r_s is not None) != bool(shapes & {"ramp", "exponential"}):
+            raise ValueError("t_r_s is required for, and only for, a ramp or exponential shape")
+        if (self.t_on_s is not None) != ("intermittent" in shapes) or (
+                self.t_off_s is not None) != ("intermittent" in shapes):
+            raise ValueError("t_on_s and t_off_s are required for, and only for, intermittent")
         return self
 
     @property
@@ -489,11 +505,14 @@ class Onset(_Model):
 
 
 FaultId = Annotated[str, Field(pattern=r"^F([1-9]|10)$")]
+ExtendedFaultId = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]*$")]
 
 
 class Faults(_Model):
     faults: dict[FaultId, Fault]
     onset: Onset
+    extended: dict[ExtendedFaultId, Fault] = {}
+    episode_horizon_s: float | None = None
 
 
 # --------------------------------------------------------------------------- links_saa_imager.yaml
@@ -536,6 +555,7 @@ class LinksSaaImager(_Model):
     cdh_upsets: CdhUpsets
     imager_dark_current: DarkCurrent
     signals: dict[str, Signal]
+    sensor_faults: dict[str, dict[str, float]]
 
 
 # --------------------------------------------------------------------------- Params
@@ -551,10 +571,15 @@ class Params(_Model):
     def _refs(self) -> Self:
         if missing := set(self.scenario.bus_of.values()) - set(self.buses):
             raise ValueError(f"scenario uses undefined buses {sorted(missing)}")
-        for fid, fault in self.faults.faults.items():
+        for fid, fault in {**self.faults.faults, **self.faults.extended}.items():
             if fault.vehicle not in self.scenario.bus_of:
                 raise ValueError(f"{fid} targets unknown vehicle {fault.vehicle}")
         return self
+
+    def fault(self, fault_id: str) -> Fault:
+        """A fault of the spec's ten or of the extended table."""
+        table = self.faults.faults if fault_id in self.faults.faults else self.faults.extended
+        return table[fault_id]
 
     def bus(self, sat_id: SatId) -> Bus:
         return self.buses[self.scenario.bus_of[sat_id]]
@@ -574,11 +599,15 @@ def load_params(directory: str | Path) -> Params:
     bus_b["thermal"] = _apply_bus_b_thermal(bus_a["thermal"], b_thermal)
     faults_raw = _read_yaml(d / "faults.yaml")
     onset = faults_raw.pop("onset")
+    extended_path = d / "faults_extended.yaml"
+    extended = _read_yaml(extended_path) if extended_path.exists() else {}
+    horizon = extended.pop("episode_horizon_s", None)
     return Params.model_validate(
         {
             "scenario": _read_yaml(d / "scenario.yaml"),
             "buses": {"A": bus_a, "B": bus_b},
-            "faults": {"faults": faults_raw, "onset": onset},
+            "faults": {"faults": faults_raw, "onset": onset, "extended": extended,
+                       "episode_horizon_s": horizon},
             "links": _read_yaml(d / "links_saa_imager.yaml"),
         }
     )
@@ -653,6 +682,8 @@ class ParamView:
     def get_series(self, path: str, t_s: NDArray[np.float64]) -> NDArray[np.float64]:
         """The value of a scalar path at each time in t_s (the view's time is restored)."""
         saved = self.t
+        if path not in self.schedule:  # fixed in time: no need to walk the samples
+            return np.full(len(t_s), self.get(path), dtype=np.float64)
         try:
             return np.array([self.at(float(t)).get(path) for t in t_s], dtype=np.float64)
         finally:

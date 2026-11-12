@@ -8,7 +8,7 @@ import json
 import pickle
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from expand3.detect.classify import run_classifier, save_model
 from expand3.detect.config import DetectConfig
@@ -39,12 +39,15 @@ def parse_seeds(text: str) -> list[int]:
     return [int(x) for x in text.split(",") if x.strip()]
 
 
-def fault_config(fault: str, lead: float | None) -> FaultConfig:
+def fault_config(fault: str, lead: float | None, fault_set: str = "spec",
+                 profile: str | None = None) -> FaultConfig:
+    kind: Literal["spec", "extended"] = "extended" if fault_set == "extended" else "spec"
     if fault == "seeded":
-        return FaultConfig(mode="seeded")
+        return FaultConfig(mode="seeded", fault_set=kind)
     if fault == "none":
         return FaultConfig(mode="none")
-    return FaultConfig(mode="forced", fault_id=fault, lead_s=lead)
+    return FaultConfig(mode="forced", fault_id=fault, lead_s=lead, fault_set=kind,
+                       profile=profile)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -54,7 +57,12 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--seeds", required=True, help="0:100, 7 or 1,5,9")
     r.add_argument("--out", required=True, type=Path)
     r.add_argument("--fault", default="seeded",
-                   choices=["seeded", "none", *[f"F{i}" for i in range(1, 11)]])
+                   help="seeded, none, F1 to F10, or an extended fault name (params/"
+                        "faults_extended.yaml)")
+    r.add_argument("--fault-set", choices=["spec", "extended"], default="spec",
+                   help="what a seeded draw is uniform over: the spec's ten, or all of them")
+    r.add_argument("--profile", default=None,
+                   help="onset shape for a forced extended fault (one of its shapes)")
     r.add_argument("--lead", type=float, default=None, help="forced fault lead [s]")
     r.add_argument("--workers", type=int, default=1)
     r.add_argument("--force", action="store_true", help="rerun completed seeds")
@@ -125,9 +133,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "compare":
         return _compare(args)
     if args.cmd == "run":
-        batch = run_batch(args.params, parse_seeds(args.seeds), args.out,
-                          fault_config(args.fault, args.lead), args.duration_h, args.workers,
-                          args.force)
+        cfg = fault_config(args.fault, args.lead, args.fault_set, args.profile)
+        batch = run_batch(args.params, parse_seeds(args.seeds), args.out, cfg, args.duration_h,
+                          args.workers, args.force)
         c = batch["counts"]
         print(f"ok {c['ok']}, skipped {c['skipped']}, failed {c['failed']} "
               f"in {batch['wall_s']:.1f} s -> {args.out}")

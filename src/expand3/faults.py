@@ -40,6 +40,8 @@ class FaultConfig:
     mode: Literal["seeded", "none", "forced"] = "seeded"
     fault_id: str | None = None
     lead_s: float | None = None
+    fault_set: Literal["spec", "extended"] = "spec"  # what a seeded draw is uniform over
+    profile: str | None = None  # forced onset shape, for an extended fault
 
 
 @dataclass
@@ -68,18 +70,49 @@ def draw_fault(params: Params, seed: int) -> tuple[str, float]:
     return fid, sample(params.scenario.fault_lead_s, rng(seed, "draw.fault_lead"))
 
 
+def draw_fault_extended(params: Params, seed: int) -> tuple[str, float, str]:
+    """One fault per seed, uniform over the spec's ten and the extended table, its lead (the same
+    draw as `draw_fault`, so a seed has one lead) and an onset shape from the fault's `shapes`.
+    Own streams `draw.fault_ext` and `draw.fault_shape`, so no existing draw moves."""
+    ids = sorted(params.faults.faults, key=lambda f: int(f[1:])) + sorted(params.faults.extended)
+    fid = ids[int(rng(seed, "draw.fault_ext").integers(len(ids)))]
+    fault = params.fault(fid)
+    shapes = fault.shapes or [fault.profile]
+    profile = shapes[int(rng(seed, "draw.fault_shape").integers(len(shapes)))]
+    return fid, sample(params.scenario.fault_lead_s, rng(seed, "draw.fault_lead")), profile
+
+
+def episodes(fault: Fault, t_arm_s: float, gen: np.random.Generator, horizon_s: float) -> F64:
+    """Boundaries [on, off, on, off, ...] of the intermittent episodes: on at arm, then
+    exponential durations with means `t_on_s` and `t_off_s`, out to `horizon_s` after arm."""
+    assert fault.t_on_s is not None
+    assert fault.t_off_s is not None
+    edges = [t_arm_s]
+    on = True
+    while edges[-1] < t_arm_s + horizon_s:
+        edges.append(edges[-1] + gen.exponential(fault.t_on_s if on else fault.t_off_s))
+        on = not on
+    return np.array(edges)
+
+
 def arm_time(t0_s: float, tick_s: float) -> float:
     """First control tick at or after t0."""
     return math.ceil(t0_s / tick_s - 1e-9) * tick_s
 
 
-def onset(fault: Fault, t_arm_s: float, t_s: float) -> float:
-    """Spec: onset profile s(t)."""
+def onset(fault: Fault, t_arm_s: float, t_s: float, edges: F64 | None = None) -> float:
+    """Spec: onset profile s(t), plus the extended shapes: exponential 1 - exp(-(t - arm)/tau)
+    and intermittent (1 inside the episodes `edges`, 0 between)."""
     if t_s < t_arm_s:
         return 0.0
     if fault.profile == "step":
         return 1.0
+    if fault.profile == "intermittent":
+        assert edges is not None
+        return float(np.searchsorted(edges, t_s, side="right") % 2 == 1)
     assert fault.t_r_s is not None
+    if fault.profile == "exponential":
+        return 1.0 - math.exp(-(t_s - t_arm_s) / fault.t_r_s)
     return min(1.0, (t_s - t_arm_s) / fault.t_r_s)
 
 
@@ -97,16 +130,26 @@ class Injector:
     """One fault armed at a given t0 on the table's vehicle."""
 
     def __init__(self, params: Params, fault_id: str, t0_s: float, lead_s: float,
-                 tick_s: float) -> None:
+                 tick_s: float, profile: str | None = None, seed: int = 0) -> None:
         self.fault_id = fault_id
-        self.fault = params.faults.faults[fault_id]
+        fault = params.fault(fault_id)
+        if profile is not None and profile != fault.profile:
+            if profile not in (fault.shapes or []):
+                raise ValueError(f"{fault_id} has no {profile} shape")
+            fault = fault.model_copy(update={"profile": profile})
+        self.fault = fault
         self.t0_s = t0_s
         self.lead_s = lead_s
         self.t_arm_s = arm_time(t0_s, tick_s)
         self._theta0 = {p: ParamView(params, self.fault.vehicle).base(p) for p in self.fault.paths}
+        self._edges: F64 | None = None
+        if fault.profile == "intermittent":
+            assert params.faults.episode_horizon_s is not None
+            self._edges = episodes(fault, self.t_arm_s, rng(seed, "draw.episodes"),
+                                   params.faults.episode_horizon_s)
 
     def s(self, t_s: float) -> float:
-        return onset(self.fault, self.t_arm_s, t_s)
+        return onset(self.fault, self.t_arm_s, t_s, self._edges)
 
     def theta(self, path: str, t_s: float) -> float:
         return perturbed(self.fault, self._theta0[path], self.s(t_s))
