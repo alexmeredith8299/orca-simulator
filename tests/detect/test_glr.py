@@ -9,6 +9,7 @@ from expand3.detect.glr import (
     gaussian_glr,
     poisson_glr,
     tune_threshold,
+    variance_glr,
 )
 
 
@@ -83,3 +84,12 @@ def test_tune_threshold_meets_target_and_floor() -> None:
     assert h > 0
     assert tune_threshold(null, days, 0.5, floor=1e3) == 1e3
     assert tune_threshold([np.zeros(10)], 1.0, 0.1, floor=2.0) == 2.0
+
+
+def test_variance_glr_is_zero_at_unit_variance_and_matches_the_closed_form() -> None:
+    z = np.concatenate([np.ones(10), 4.0 * np.ones(5)])  # squared residuals: variance 4 for 5
+    s = variance_glr(z, window=10, dof=3)
+    assert np.all(s[:10] == 0)
+    # n dof / 2 (r - 1 - ln r) with r = 4
+    assert s[14] == pytest.approx(0.5 * 3 * 5 * (4.0 - 1.0 - np.log(4.0)))
+    assert np.all(variance_glr(0.25 * np.ones(8), 5) == 0)  # a smaller variance is no alarm

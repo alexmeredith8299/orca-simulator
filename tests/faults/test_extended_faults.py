@@ -13,12 +13,13 @@ from expand3.faults import (
     onset,
 )
 from expand3.params import Params, ParamView
-from expand3.sensors import imu
+from expand3.sensors import gnss, imu
 from expand3.timebase import rng
 
 TICK = 30.0
 IMU_FAULTS = ["gyro_bias", "gyro_scale", "gyro_noise", "gyro_stuck"]
-DONE = [*IMU_FAULTS]  # extended with each step of Phase A
+GNSS_FAULTS = ["gnss_jump", "gnss_noise"]
+DONE = [*IMU_FAULTS, *GNSS_FAULTS]  # extended with each step of Phase A
 
 
 def test_extended_table_is_separate_from_the_spec_ten(params: Params) -> None:
@@ -156,3 +157,38 @@ def test_stuck_gyro_holds_the_last_healthy_sample(params: Params) -> None:
     last = int(np.flatnonzero(~after)[-1])
     np.testing.assert_array_equal(st[after], np.tile(base[last], (int(after.sum()), 1)))
     np.testing.assert_array_equal(st[~after], base[~after])
+
+
+# ---- GNSS effects on the measurement ----------------------------------------------------------
+def _gnss(params: Params, schedule: dict[str, float] | None = None, arm: float = 3000.0
+          ) -> tuple[np.ndarray, tuple[np.ndarray, np.ndarray]]:
+    view = ParamView(params, "SAT-2")
+    for path, value in (schedule or {}).items():
+        view.schedule[path] = lambda t, v=value, p=path: (
+            v if t >= arm else gnss_nominal[p])
+    t = np.arange(0.0, 6000.0, TICK)
+    r = np.stack([7000.0 + 0 * t, 10.0 * t, 0 * t], axis=1)
+    v = np.stack([0 * t, 7.5 + 0 * t, 0 * t], axis=1)
+    pos, vel = gnss(rng(5, "noise.gnss.SAT-2"), view, t, r, v)
+    return pos.t_s, (pos.meas - pos.truth, vel.meas - vel.truth)
+
+
+gnss_nominal = {"sensor_faults.gnss.offset_m": 0.0, "sensor_faults.gnss.noise_mult": 1.0}
+
+
+def test_gnss_offset_is_added_to_position_only_after_arm(params: Params) -> None:
+    t, (dr0, dv0) = _gnss(params)
+    _, (dr, dv) = _gnss(params, {"sensor_faults.gnss.offset_m": 10.0})
+    after = t >= 3000.0
+    np.testing.assert_allclose((dr - dr0)[after], 10.0e-3, atol=1e-12)  # km
+    np.testing.assert_array_equal(dr[~after], dr0[~after])
+    np.testing.assert_array_equal(dv, dv0)
+
+
+def test_gnss_noise_multiplier_scales_position_and_velocity_after_arm(params: Params) -> None:
+    t, (dr0, dv0) = _gnss(params)
+    _, (dr, dv) = _gnss(params, {"sensor_faults.gnss.noise_mult": 5.0})
+    after = t >= 3000.0
+    np.testing.assert_allclose(dr[after], 5.0 * dr0[after], atol=1e-15)
+    np.testing.assert_allclose(dv[after], 5.0 * dv0[after], atol=1e-15)
+    np.testing.assert_array_equal(dr[~after], dr0[~after])

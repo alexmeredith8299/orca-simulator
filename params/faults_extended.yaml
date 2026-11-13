@@ -10,3 +10,9 @@ gyro_bias:  {name: gyro bias, vehicle: SAT-1, param: sensor_faults.imu.bias_rad_
 gyro_scale: {name: gyro scale factor, vehicle: SAT-5, param: sensor_faults.imu.scale, m: 1.25, profile: step, shapes: [step, ramp], t_r_s: 21600}
 gyro_noise: {name: gyro noise, vehicle: SAT-6, param: sensor_faults.imu.noise_mult, m: 5, profile: ramp, shapes: [ramp, intermittent], t_r_s: 21600, t_on_s: 1800, t_off_s: 3600}
 gyro_stuck: {name: gyro stuck, vehicle: SAT-3, param: sensor_faults.imu.stuck, set_to: 1, profile: step}
+
+# GNSS: fix noise is 1.5 m and 5 cm/s (1 sigma). The jump is 10 m on every axis (17 m, 11 sigma),
+# held constant (step) or grown over 6 h (ramp). The noise is x5 on position and velocity. SAT-2
+# and SAT-3 sit in the four-vehicle cluster, so they have three crosslink partners.
+gnss_jump:  {name: gnss position jump, vehicle: SAT-2, param: sensor_faults.gnss.offset_m, set_to: 10.0, profile: step, shapes: [step, ramp], t_r_s: 21600}
+gnss_noise: {name: gnss noise, vehicle: SAT-3, param: sensor_faults.gnss.noise_mult, m: 5, profile: ramp, shapes: [ramp, intermittent], t_r_s: 21600, t_on_s: 1800, t_off_s: 3600}

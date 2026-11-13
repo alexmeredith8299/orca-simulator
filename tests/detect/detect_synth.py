@@ -15,7 +15,8 @@ ARM_S = 70000.0
 TAKE_S = 80000.0
 LAMBDA_IN = 5.5e-4
 D0, T_REF, DT_D = 10.0, 293.15, 6.5
-FAULT_VEHICLE = {"F1": "SAT-2", "F2": "SAT-2", "F3": "SAT-3", "F4": "SAT-3", "F5": "SAT-2",
+FAULT_VEHICLE = {"gnss_jump": "SAT-2", "gnss_noise": "SAT-2",
+                 "F1": "SAT-2", "F2": "SAT-2", "F3": "SAT-3", "F4": "SAT-3", "F5": "SAT-2",
                  "F6": "SAT-2", "F7": "SAT-2", "F8": "SAT-2", "F9": "SAT-2", "F10": "SAT-2"}
 MU, A_KM, PERIOD_S = 398600.4418, 6903.137, 5700.0
 INCL = np.deg2rad(97.5)
@@ -76,7 +77,34 @@ def _gnss(t: np.ndarray, k: int, fault: str, faulted: bool, sat: str, rng: np.ra
     return out
 
 
-def make_seed(out: Path, seed: int, fault: str) -> Path:
+def _kepler(t: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
+    """Truth position and velocity [km, km/s] on a circular orbit, one phase per vehicle."""
+    w = 2 * np.pi / PERIOD_S
+    u = w * t + 0.03 * k
+    r = A_KM * np.stack([np.cos(u), np.sin(u) * np.cos(INCL), np.sin(u) * np.sin(INCL)], axis=1)
+    v = A_KM * w * np.stack([-np.sin(u), np.cos(u) * np.cos(INCL), np.cos(u) * np.sin(INCL)],
+                            axis=1)
+    return r, v
+
+
+def _gnss_kepler(t: np.ndarray, k: int, fault: str, faulted: bool, rng: np.random.Generator,
+                 ) -> dict[str, np.ndarray]:
+    """Fixes of the consistent orbit with the GNSS faults: a 10 m offset on every axis from ARM_S
+    (gnss_jump), or five times the noise (gnss_noise)."""
+    r, v = _kepler(t, k)
+    post = (t >= ARM_S) & faulted
+    mult = np.where(post & (fault == "gnss_noise"), 5.0, 1.0)[:, None]
+    offset = np.where(post & (fault == "gnss_jump"), 10.0e-3, 0.0)[:, None]
+    r = r + 1.5e-3 * rng.standard_normal(r.shape) * mult + offset
+    v = v + 5e-5 * rng.standard_normal(v.shape) * mult
+    out = {"gnss_valid": (np.arange(t.size) % 2 == 0).astype(float)}
+    for i, ax in enumerate("xyz"):
+        out[f"gnss_r_{ax}_km_meas"] = r[:, i]
+        out[f"gnss_v_{ax}_km_s_meas"] = v[:, i]
+    return out
+
+
+def make_seed(out: Path, seed: int, fault: str, kepler: bool = False) -> Path:
     """Three vehicles, a day. Fault `none` or F2, F3, F4, F8, F9, F10 on its vehicle from ARM_S."""
     rng = np.random.default_rng(seed)
     d = out / f"seed_{seed:05d}"
@@ -137,12 +165,18 @@ def make_seed(out: Path, seed: int, fault: str) -> Path:
             cols[f"imu_omega_{ax}_rad_s_meas"] += list(5e-5 * rng.standard_normal(n))
     del meas
     nav_rng = np.random.default_rng(seed + 10_000)  # its own stream: the others are unchanged
-    nav = [_gnss(t, k, fault, sat == vehicle, sat, nav_rng) for k, sat in enumerate(SATS)]
+    nav = [_gnss_kepler(t, k, fault, sat == vehicle, nav_rng) if kepler
+           else _gnss(t, k, fault, sat == vehicle, sat, nav_rng) for k, sat in enumerate(SATS)]
     for name in nav[0]:
         cols[name] = [v for fixes in nav for v in fixes[name]]
     pq.write_table(pa.table(cols), d / "measurements.parquet")
 
     link: dict[str, list] = {k: [] for k in ("t_s", "sender", "receiver", "sent", "delivered")}
+    if kepler:  # the states the receivers hold: truth with 20 m and 2 cm/s of receive noise
+        for c in ("r_x_km_meas", "r_y_km_meas", "r_z_km_meas", "v_x_km_s_meas",
+                  "v_y_km_s_meas", "v_z_km_s_meas"):
+            link[c] = []
+    link_rng = np.random.default_rng(seed + 20_000)  # its own stream, as the fixes
     for a in SATS:
         for b in SATS:
             if a == b:
@@ -155,6 +189,11 @@ def make_seed(out: Path, seed: int, fault: str) -> Path:
             link["receiver"] += [b] * n
             link["sent"] += [True] * n
             link["delivered"] += list(rng.random(n) >= p_drop)
+            if kepler:
+                r, v = _kepler(t, SATS.index(a))
+                for i, ax in enumerate("xyz"):
+                    link[f"r_{ax}_km_meas"] += list(r[:, i] + 20e-3 * link_rng.standard_normal(n))
+                    link[f"v_{ax}_km_s_meas"] += list(v[:, i] + 2e-5 * link_rng.standard_normal(n))
     pq.write_table(pa.table(link), d / "crosslink.parquet")
 
     take_rows, wheel_rows = [], []
@@ -185,7 +224,7 @@ def make_seed(out: Path, seed: int, fault: str) -> Path:
     return d
 
 
-def make_batch(out: Path, faults: list[str]) -> list[int]:
+def make_batch(out: Path, faults: list[str], kepler: bool = False) -> list[int]:
     for seed, fault in enumerate(faults):
-        make_seed(out, seed, fault)
+        make_seed(out, seed, fault, kepler)
     return list(range(len(faults)))

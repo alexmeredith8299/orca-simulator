@@ -43,7 +43,8 @@ def test_trailing_sum_is_causal() -> None:
 
 def test_registry_names() -> None:
     faults = ("mcd_f2", "mcdn_f8", "mcdn_f9", "mcdn_f10", "mcdn_wheels", "mcdn_burn")
-    assert set(MCDN) == {f"{f}{s}" for f in faults for s in ("", "_sig", "_sig_comms")}
+    assert set(MCDN) == {f"{f}{s}" for f in faults for s in ("", "_sig", "_sig_comms")} | {
+        "mcdn_gnss", "mcdn_gnss_sig"}
     assert not set(detector_names("all")) & set(MCDN)
 
 
@@ -121,4 +122,35 @@ def test_the_faulted_vehicles_score_stands_out(tmp_path: Path, name: str, kind: 
     for t in mine:  # a vehicle can have several traces (strings): its score is the largest
         top[t.sat_id] = max(top.get(t.sat_id, 0.0), float(np.max(t.score)))
     others = max((v for s, v in top.items() if s != FAULT_VEHICLE[kind]), default=0.0)
+    assert top[FAULT_VEHICLE[kind]] > 3.0 * max(others, 1.0), (kind, top)
+
+
+def test_gnss_hermite_miss_is_the_fix_noise_and_the_peer_miss_is_scaled_by_root_k(
+        tmp_path: Path) -> None:
+    seed = make_batch(tmp_path, ["none"], kepler=True)[0]
+    d = SeedData(tmp_path / f"seed_{seed:05d}")
+    own = MCDN["mcdn_gnss"](CFG, str(PARAMS_DIR)).samples(d, "SAT-1")  # type: ignore[attr-defined]
+    assert own.y.shape[1] == 3
+    assert 2.0 < own.y.std() < 4.0  # 1.5 m on both ends and 5 cm/s over 60 s, about 3 m
+    assert abs(own.y.mean()) < 0.3
+    peer = MCDN["mcdn_gnss_sig"](CFG, str(PARAMS_DIR)).samples(d, "SAT-1")  # type: ignore[attr-defined]
+    assert peer.y.shape[1] == 6
+    assert set(np.unique(peer.local)) == {2.0}  # three vehicles: two partners
+    assert 18.0 < peer.y[:, :3].std() < 24.0  # the 20 m receive noise
+    assert abs(peer.y[:, :3].mean()) < 0.5
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(("name", "kind", "fid"), [
+    ("mcdn_gnss", "gnss_noise", "gnss_noise"), ("mcdn_gnss_sig", "gnss_noise", "gnss_noise"),
+    ("mcdn_gnss_sig", "gnss_jump", "gnss_jump")])
+def test_the_gnss_faulted_vehicles_score_stands_out(tmp_path: Path, name: str, kind: str,
+                                                    fid: str) -> None:
+    seeds = make_batch(tmp_path, [*(["none"] * 6), kind], kepler=True)
+    keep: dict[str, object] = {}
+    cfg = replace(CFG, mcd_epochs=40, mcd_batch=64)
+    run_detectors(tmp_path, [name], seeds[:6], seeds[6:], cfg, PARAMS_DIR, keep=keep)
+    traces = keep["traces"][seeds[6]][0][name]  # type: ignore[index]
+    top = {t.sat_id: float(np.max(t.score)) for t in traces if t.fault_id == fid}
+    others = max(v for s, v in top.items() if s != FAULT_VEHICLE[kind])
     assert top[FAULT_VEHICLE[kind]] > 3.0 * max(others, 1.0), (kind, top)

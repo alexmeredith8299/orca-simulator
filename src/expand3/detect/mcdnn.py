@@ -15,6 +15,9 @@ and the GLR that fits the quantity scores the miss:
 - F9: per block, the upset count while inside the SAA (Poisson). The expected count is the
   network's mean plus its epistemic std.
 - F10: per take, log2 of the dark current from the payload temperature (Gaussian, one sample).
+- gnss_jump, gnss_noise (extended faults): the GNSS fixes against what the orbit makes of them,
+  alone (`McdGnss`) or against the states the partners received over the crosslink
+  (`McdGnssPeer`, named `mcdn_gnss_sig`).
 
 Each has the single-vehicle form (the vehicle's own context features and its own inputs) and, with
 `_sig`, the multi-satellite form of `mcdmulti.py`: the context of all six vehicles and the other
@@ -36,7 +39,7 @@ from expand3.detect.base import Detector, Trace
 from expand3.detect.comms import hold
 from expand3.detect.data import SeedData
 from expand3.detect.features import context, sunlit
-from expand3.detect.glr import binomial_glr, gaussian_glr, poisson_glr, slope_glr
+from expand3.detect.glr import binomial_glr, gaussian_glr, poisson_glr, slope_glr, variance_glr
 from expand3.detect.mcdmulti import ALL, _MultiView, measured_block
 from expand3.detect.mcdrop import McdModel, McdThermal
 from expand3.params import load_params
@@ -46,6 +49,7 @@ F32 = NDArray[np.float32]
 IntArr = NDArray[np.int64]
 N_WHEELS = 4
 N_STRINGS = 4
+M_PER_KM = 1000.0  # the batch tables carry km and km/s; the misses are scored in m and m/s
 
 
 def blocks(n: int, stride: int) -> tuple[IntArr, IntArr]:
@@ -374,6 +378,106 @@ class McdBurn(_Nn):
         return out
 
 
+# ---- gnss_jump, gnss_noise: the fixes against the orbit, or against the partners -------------
+class McdGnss(_Nn):
+    """The vehicle's own consecutive fixes (60 s apart). Hermite's rule makes
+    r1 - r0 - (v0 + v1) dt / 2 - dt^2 (a0 - a1) / 12 zero to order dt^5 for a smooth orbit, with a
+    = -mu r / |r|^3, so the miss is the fix noise (about 3 m per axis) and the small J2 term the
+    network learns. A noisier receiver raises its variance. A constant offset cancels between two
+    fixes, so a step in the position shows only in the one pair that spans it and a slow ramp
+    not at all: no number the vehicle holds alone separates a constant offset from the orbit.
+    """
+
+    name = "mcdn_gnss"
+    fault_ids = ("gnss_jump", "gnss_noise")
+    block_key = "gnss"
+    cols: tuple[str, ...] = ("hermite_x_m", "hermite_y_m", "hermite_z_m")
+    overrides = (("mcd_epochs", 100), ("mcd_hidden", 32), ("mcd_sigma_floor", 1e-3))
+
+    def _mu(self) -> float:
+        assert self.params_dir is not None
+        return load_params(self.params_dir).scenario.constants.mu_km3_s2
+
+    def _fixes(self, m: dict[str, F64]) -> tuple[F64, F64, NDArray[np.bool_]]:
+        r = np.stack([m[f"gnss_r_{ax}_km_meas"] for ax in "xyz"], axis=1)
+        v = np.stack([m[f"gnss_v_{ax}_km_s_meas"] for ax in "xyz"], axis=1)
+        return r, v, m["gnss_valid"] > 0.5
+
+    def samples(self, d: SeedData, sat: str) -> Samples:
+        m = d.measurements(sat)
+        r, v, valid = self._fixes(m)
+        idx = np.flatnonzero(valid)
+        if idx.size < 2:
+            return _empty(3, 6)
+        i0, i1 = idx[:-1], idx[1:]
+        dt = m["t_s"][i1] - m["t_s"][i0]
+        mu = self._mu()
+        acc = -mu * r[idx] / np.linalg.norm(r[idx], axis=1, keepdims=True) ** 3
+        a0, a1 = acc[:-1], acc[1:]
+        hermite = (r[i1] - r[i0] - 0.5 * (v[i0] + v[i1]) * dt[:, None]
+                   - dt[:, None] ** 2 * (a0 - a1) / 12.0) * M_PER_KM
+        ok = dt <= 1.5 * float(np.median(dt))  # a pair across an outage is not a pair
+        unit = r[i1] / np.linalg.norm(r[i1], axis=1, keepdims=True)
+        vu = v[i1] / np.linalg.norm(v[i1], axis=1, keepdims=True)
+        return Samples(m["t_s"][i1][ok], i1[ok].astype(np.int64),
+                       np.concatenate([unit, vu], axis=1)[ok], hermite[ok])
+
+    def score(self, d: SeedData, per: dict[str, tuple[Samples, F64, F64]]) -> list[Trace]:
+        out = []
+        for sat, (s, mean, std) in per.items():
+            z = np.nan_to_num((s.y - mean) / std)
+            shift = sum(gaussian_glr(z[:, j], 0.0, 1.0, self.cfg.nn_gnss_window)
+                        for j in range(z.shape[1]))
+            spread = variance_glr(np.mean(z**2, axis=1), self.cfg.nn_gnss_window, z.shape[1])
+            out += [Trace(sat, "gnss_jump", s.t, np.asarray(shift)),
+                    Trace(sat, "gnss_noise", s.t, spread)]
+        return out
+
+
+class McdGnssPeer(McdGnss):
+    """The vehicle's fix against the state its crosslink partners received from it (truth with
+    20 m and 2 cm/s of receive noise), on the ticks the messages were delivered. The partners'
+    copy does not contain the vehicle's GNSS error, so an offset that holds still shows up in
+    full, which the vehicle alone cannot see. With k messages the miss is multiplied by sqrt(k)
+    so the network's target has one spread whatever the number of partners reached."""
+
+    name = "mcdn_gnss_sig"
+    cols = tuple(f"{q}_{ax}" for q in ("peer_pos_m", "peer_vel_m_s") for ax in "xyz")
+
+    def samples(self, d: SeedData, sat: str) -> Samples:
+        m = d.measurements(sat)
+        r, v, valid = self._fixes(m)
+        t_grid = m["t_s"]
+        names = ["t_s", "sender", "delivered",
+                 *[f"r_{ax}_km_meas" for ax in "xyz"], *[f"v_{ax}_km_s_meas" for ax in "xyz"]]
+        link = d.table("crosslink", names)
+        sel = (np.asarray(link.column("sender")) == sat) & np.asarray(link.column("delivered"),
+                                                                       dtype=bool)
+        tick = np.searchsorted(t_grid, np.asarray(link.column("t_s"), dtype=np.float64)[sel])
+        got = np.zeros((len(t_grid), 6))
+        count = np.zeros(len(t_grid))
+        for j, name in enumerate(names[3:]):
+            np.add.at(got[:, j], tick, np.asarray(link.column(name), dtype=np.float64)[sel])
+        np.add.at(count, tick, 1.0)
+        pick = np.flatnonzero(valid & (count > 0))
+        k = count[pick, None]
+        ref = got[pick] / k
+        miss = np.concatenate([(r[pick] - ref[:, :3]) * M_PER_KM,
+                               (v[pick] - ref[:, 3:]) * M_PER_KM], axis=1) * np.sqrt(k)
+        return Samples(t_grid[pick], pick.astype(np.int64), k, miss)
+
+    def score(self, d: SeedData, per: dict[str, tuple[Samples, F64, F64]]) -> list[Trace]:
+        out = []
+        for sat, (s, mean, std) in per.items():
+            z = np.nan_to_num((s.y - mean) / std)
+            shift = sum(gaussian_glr(z[:, j], 0.0, 1.0, self.cfg.nn_gnss_window)
+                        for j in range(3))  # position only: the offset is in position
+            spread = variance_glr(np.mean(z**2, axis=1), self.cfg.nn_gnss_window, z.shape[1])
+            out += [Trace(sat, "gnss_jump", s.t, np.asarray(shift)),
+                    Trace(sat, "gnss_noise", s.t, spread)]
+        return out
+
+
 # ---- F2: string power, an LSTM like the thermal detectors ------------------------------------
 class McdStrings(_MultiView, McdThermal):
     """F2: each string's power while sunlit, scored for a drop."""
@@ -430,3 +534,4 @@ def _variants(base: Any) -> dict[str, type[Detector]]:
 MCDN: dict[str, type[Detector]] = {
     k: v for base in (McdStrings, McdDrops, McdUpsets, McdDark, McdWheels, McdBurn)
     for k, v in _variants(base).items()}
+MCDN |= {c.name: c for c in (McdGnss, McdGnssPeer)}

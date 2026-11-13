@@ -82,13 +82,18 @@ def every(t_s: F64, rate_s: float) -> B:
 
 def gnss(rng: np.random.Generator, view: ParamView, t_s: F64, r_km: F64, v_km_s: F64
          ) -> tuple[Sampled, Sampled]:
-    """Spec: GNSS position and velocity, truth + N(0, 1.5 m), N(0, 5 cm/s) per axis, every 60 s."""
+    """Spec: GNSS position and velocity, truth + N(0, 1.5 m), N(0, 5 cm/s) per axis, every 60 s.
+    Extended faults (gnss_jump, gnss_noise): a position offset on every axis, and the noise
+    times its multiplier on position and velocity."""
     m = every(t_s, view.get("signals.gnss.rate_s"))
+    ts = t_s[m]
     n = int(m.sum())
     dr = rng.normal(0.0, view.get("signals.gnss.pos_sigma_m") / M_PER_KM, (n, 3))
     dv = rng.normal(0.0, view.get("signals.gnss.vel_sigma_m_s") / M_PER_KM, (n, 3))
-    return (Sampled(t_s[m], r_km[m] + dr, r_km[m].copy()),
-            Sampled(t_s[m], v_km_s[m] + dv, v_km_s[m].copy()))
+    mult = view.get_series("sensor_faults.gnss.noise_mult", ts)[:, None]
+    offset = view.get_series("sensor_faults.gnss.offset_m", ts)[:, None] / M_PER_KM
+    return (Sampled(ts, r_km[m] + dr * mult + offset, r_km[m].copy()),
+            Sampled(ts, v_km_s[m] + dv * mult, v_km_s[m].copy()))
 
 
 def tracker_basis(view: ParamView) -> F64:

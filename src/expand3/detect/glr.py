@@ -46,6 +46,18 @@ def gaussian_glr(x: F64, mu0: float, sigma: float, window: int, side: Side = "bo
     return _window_max([np.asarray(x, dtype=np.float64) - mu0], window, llr)
 
 
+def variance_glr(z: F64, window: int, dof: int = 1) -> F64:
+    """One-sided GLR for the variance of standardized residuals rising above 1. `z` holds the
+    mean of `dof` squared standardized residuals per sample, so a window of n samples carries
+    n dof degrees of freedom: n dof / 2 (r - 1 - ln r) with r the window mean, where r > 1."""
+
+    def llr(total: F64, *, n: F64) -> F64:
+        ratio = np.maximum(total / n, 1.0)
+        return np.asarray(0.5 * dof * n * (ratio - 1.0 - np.log(ratio)), dtype=np.float64)
+
+    return _window_max([np.asarray(z, dtype=np.float64)], window, llr)
+
+
 def slope_glr(r: F64, x: F64, sigma: float, window: int) -> F64:
     """GLR for a residual that grows with a known regressor, r = beta x + noise, against beta = 0:
     (sum of x r)^2 / (2 sigma^2 sum of x^2) over the window. A resistance change shows up this
