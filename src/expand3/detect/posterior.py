@@ -80,16 +80,20 @@ class Channel:
         return np.asarray(expit(z))
 
 
-def load_priors(params_dir: Path) -> dict[str, Prior]:
+def load_priors(params_dir: Path, fault_set: str = "spec") -> dict[str, Prior]:
     """Priors from `faults.yaml` (vehicle, one fault per seed uniform over those listed) and
-    `scenario.yaml` (the lead draw)."""
+    `scenario.yaml` (the lead draw). With `fault_set="extended"` the draw is uniform over the spec
+    faults and the extended ones (`faults_extended.yaml`, as `draw_fault_extended`), so each has
+    pi = 1 / (10 + the number of extended faults)."""
     p = load_params(params_dir)
     lead = p.scenario.fault_lead_s
     if lead.low is None or lead.high is None or lead.high <= lead.low:
         raise ValueError("the posterior needs a uniform fault lead with low < high")
-    n = len(p.faults.faults)
-    return {fid: Prior(fid, f.vehicle, 1.0 / n, float(lead.low), float(lead.high))
-            for fid, f in p.faults.faults.items()}
+    table = dict(p.faults.faults)
+    if fault_set == "extended":
+        table |= p.faults.extended
+    return {fid: Prior(fid, f.vehicle, 1.0 / len(table), float(lead.low), float(lead.high))
+            for fid, f in table.items()}
 
 
 def onset_cdf(t_s: F64, t_take_s: float | None, low_s: float, high_s: float) -> F64:
@@ -202,12 +206,13 @@ def _zoh(t_to: F64, t_from: F64, x: F64) -> F64:
 
 def posterior_batch(batch: Path, names: list[str], tune: list[int], test: list[int],
                     traces: dict[int, Any], cfg: DetectConfig, params_dir: Path,
-                    p_alarm: float = 0.9, select: bool = False) -> dict[str, Any]:
+                    p_alarm: float = 0.9, select: bool = False, fault_set: str = "spec"
+                    ) -> dict[str, Any]:
     """Fit the channels on the tune seeds and compute the posterior on every seed in tune and
     test. `traces` is the harness trace set (seed -> (traces by detector, info)). With `select`
     a fault covered by several detectors keeps the one with the lowest tune log loss."""
     del cfg
-    priors = load_priors(params_dir)
+    priors = load_priors(params_dir, fault_set)
     cands = _candidates(names, priors, select)
     dirs = seed_dirs(batch)
     modeled: dict[str, float] = {}

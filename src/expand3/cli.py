@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import json
 import pickle
-import re
 from pathlib import Path
 from typing import Any, Literal
 
@@ -20,7 +19,7 @@ from expand3.detect.harness import (
     read_alarms,
     write_alarms,
 )
-from expand3.detect.posterior import posterior_batch, write_posterior
+from expand3.detect.posterior import load_priors, posterior_batch, write_posterior
 from expand3.detect.rawclf import run_raw_classifier
 from expand3.detect.registry import CLASSIFIER, CLASSIFIERS, RAW_CLASSIFIER, REGISTRY, describe
 from expand3.detect.score import compare, score_seeds, write_comparison, write_score
@@ -113,6 +112,8 @@ def main(argv: list[str] | None = None) -> int:
     po.add_argument("--select", action="store_true",
                     help="when several detectors cover a fault, keep the one with the lowest "
                          "tune log loss")
+    po.add_argument("--fault-set", choices=["spec", "extended"], default="spec",
+                    help="the faults the batch's seeds were drawn from, which sets the prior")
     po.add_argument("--tune", default="0:70", help="seeds that fit the posterior")
     po.add_argument("--test", default="70:100")
     po.add_argument("--nominal", type=Path, default=None,
@@ -156,8 +157,9 @@ _INFO = {CLASSIFIER: "classifier", RAW_CLASSIFIER: "classifier_raw"}
 
 def _posterior(args: argparse.Namespace) -> int:
     # unsupervised detectors name subsystems, not faults, so they carry no posterior
+    priors = load_priors(args.params, args.fault_set)
     names = [n for n in detector_names(args.detector)
-             if any(re.fullmatch(r"F\d+", f) for f in REGISTRY[n].fault_ids)]
+             if any(f in priors for f in REGISTRY[n].fault_ids)]
     tune, test = parse_seeds(args.tune), parse_seeds(args.test)
     out = args.out or args.batch / "detect" / "posterior"
     cfg = DetectConfig()
@@ -168,7 +170,7 @@ def _posterior(args: argparse.Namespace) -> int:
         nominal = calibrate_nominal(args.batch, names, tune, cfg, args.params, args.workers)
     traces = compute_traces(args.batch, nominal, [*tune, *test], cfg, args.params, args.workers)
     post = posterior_batch(args.batch, names, tune, test, traces, cfg, args.params, args.p_alarm,
-                           args.select)
+                           args.select, args.fault_set)
     write_posterior(out, post)
     write_alarms(out / "alarms.csv", post["alarms"])
     for fid, c in sorted(post["channels"].items()):

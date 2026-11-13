@@ -33,6 +33,17 @@ def test_priors_come_from_the_params() -> None:
     assert (priors["F1"].lead_low_s, priors["F1"].lead_high_s) == (LOW, HIGH)
 
 
+def test_extended_priors_are_uniform_over_the_spec_and_extended_faults() -> None:
+    from expand3.params import load_params
+
+    p = load_params(PARAMS_DIR)
+    priors = load_priors(PARAMS_DIR, "extended")
+    n = len(p.faults.faults) + len(p.faults.extended)
+    assert set(priors) == set(p.faults.faults) | set(p.faults.extended)
+    assert all(v.pi == pytest.approx(1.0 / n) for v in priors.values())
+    assert priors["gnss_jump"].vehicle == "SAT-2"
+
+
 def test_onset_cdf_follows_the_uniform_lead() -> None:
     take = 100000.0
     t = np.array([take - HIGH - 1.0, take - HIGH, take - 0.5 * (LOW + HIGH), take - LOW,
