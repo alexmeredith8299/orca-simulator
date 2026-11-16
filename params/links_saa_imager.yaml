@@ -7,8 +7,9 @@ imager_dark_current: {D0_e_s_px: 10, T_ref_K: 293.15, delta_T_K: 6.5}
 signals:
   gnss: {rate_s: 60, pos_sigma_m: 1.5, vel_sigma_m_s: 0.05}
   # nav: onboard EKF on the GNSS fixes, one solution per fix; accel_sigma_m_s2 is its process noise,
-  # step_s its propagation step. Default, spec silent.
-  nav: {rate_s: 60, accel_sigma_m_s2: 1.0e-5, step_s: 10}
+  # step_s its propagation step,
+  # drag_scale_* the prior spread and random walk of its density multiplier. Default, spec silent.
+  nav: {rate_s: 60, accel_sigma_m_s2: 1.0e-5, step_s: 10, drag_scale_sigma: 1.0, drag_scale_walk_per_sqrt_s: 1.0e-3}
   star_tracker: {rate_s: 30}
   imu: {rate_s: 30, sigma_rad_s: 5.0e-5}
   pack_voltage: {rate_s: 30, sigma_V: 0.04}

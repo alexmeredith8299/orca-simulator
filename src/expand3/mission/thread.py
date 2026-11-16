@@ -625,7 +625,8 @@ def _vehicle_signals(
 
     r, v = traj.r[:, k], traj.v[:, k]
     pos, vel = gnss(stream("gnss"), view, t, r, v)
-    nav = navigate(view, nav_model(params, sat, pole), pos.t_s, pos.meas, vel.meas)
+    nav = navigate(view, nav_model(params, sat, pole), pos.t_s, pos.meas, vel.meas, t,
+                    traj.a_cmd[:, k])
     volts = pack_voltage(stream("voltage"), view, t, eps.v_V)
     amps = pack_current(stream("current"), view, t, eps.i_A)
     soc_meas = soc_estimate(stream("soc"), view, volts.t_s, volts.meas, amps.meas,
