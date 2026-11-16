@@ -97,10 +97,24 @@ def _gnss_kepler(t: np.ndarray, k: int, fault: str, faulted: bool, rng: np.rando
     offset = np.where(post & (fault == "gnss_jump"), 10.0e-3, 0.0)[:, None]
     r = r + 1.5e-3 * rng.standard_normal(r.shape) * mult + offset
     v = v + 5e-5 * rng.standard_normal(v.shape) * mult
-    out = {"gnss_valid": (np.arange(t.size) % 2 == 0).astype(float)}
+    valid = np.arange(t.size) % 2 == 0
+    out = {"gnss_valid": valid.astype(float)}
+    # the vehicle's navigation solution: the truth plus a first-order filter (gain 0.3) of the
+    # fixes' error, so noise is averaged down and an offset is taken in over a few fixes
+    truth_r, truth_v = _kepler(t, k)
+    nr, nv = truth_r.copy(), truth_v.copy()
+    ok = np.flatnonzero(valid)
+    er, ev = np.zeros(3), np.zeros(3)
+    for j, i in enumerate(ok):
+        gain = 1.0 if j == 0 else 0.3
+        er = er + gain * ((r[i] - truth_r[i]) - er)
+        ev = ev + gain * ((v[i] - truth_v[i]) - ev)
+        nr[i], nv[i] = truth_r[i] + er, truth_v[i] + ev
     for i, ax in enumerate("xyz"):
         out[f"gnss_r_{ax}_km_meas"] = r[:, i]
         out[f"gnss_v_{ax}_km_s_meas"] = v[:, i]
+        out[f"nav_r_{ax}_km_meas"] = nr[:, i]
+        out[f"nav_v_{ax}_km_s_meas"] = nv[:, i]
     return out
 
 
@@ -172,11 +186,6 @@ def make_seed(out: Path, seed: int, fault: str, kepler: bool = False) -> Path:
     pq.write_table(pa.table(cols), d / "measurements.parquet")
 
     link: dict[str, list] = {k: [] for k in ("t_s", "sender", "receiver", "sent", "delivered")}
-    if kepler:  # the states the receivers hold: truth with 20 m and 2 cm/s of receive noise
-        for c in ("r_x_km_meas", "r_y_km_meas", "r_z_km_meas", "v_x_km_s_meas",
-                  "v_y_km_s_meas", "v_z_km_s_meas"):
-            link[c] = []
-    link_rng = np.random.default_rng(seed + 20_000)  # its own stream, as the fixes
     for a in SATS:
         for b in SATS:
             if a == b:
@@ -189,11 +198,6 @@ def make_seed(out: Path, seed: int, fault: str, kepler: bool = False) -> Path:
             link["receiver"] += [b] * n
             link["sent"] += [True] * n
             link["delivered"] += list(rng.random(n) >= p_drop)
-            if kepler:
-                r, v = _kepler(t, SATS.index(a))
-                for i, ax in enumerate("xyz"):
-                    link[f"r_{ax}_km_meas"] += list(r[:, i] + 20e-3 * link_rng.standard_normal(n))
-                    link[f"v_{ax}_km_s_meas"] += list(v[:, i] + 2e-5 * link_rng.standard_normal(n))
     pq.write_table(pa.table(link), d / "crosslink.parquet")
 
     take_rows, wheel_rows = [], []

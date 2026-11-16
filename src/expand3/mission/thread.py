@@ -61,6 +61,7 @@ from expand3.timebase import Clock, SeedDraws, draw_seed, rng
 from expand3.vehicle.attitude import quat_conj, quat_mul, quat_rotate
 from expand3.vehicle.cdh import SaaHistory, saa_history
 from expand3.vehicle.eps import BATTERY_NODE, PAYLOAD_NODE, Eps, EpsHistory, EpsInputs, history
+from expand3.vehicle.nav import nav_model, navigate
 from expand3.vehicle.orbit import Forces, OrbitModel, initial_states, rk4_step
 from expand3.vehicle.payload import dark_current_e_s_px
 from expand3.vehicle.thermal import (
@@ -319,7 +320,7 @@ def run_mission(
         rec.dark_current_e_s_px = dark_current_e_s_px(views[sat].at(rec.t_take_s), rec.payload_K)
     signals = {
         sat: _vehicle_signals(
-            draws.seed, views[sat], k, t, traj, q, omega, sun_u, gate_pass, gate_take,
+            params, pole, draws.seed, views[sat], k, t, traj, q, omega, sun_u, gate_pass, gate_take,
             gate_slew, eps[sat], thermal[sat], therm_noise[sat], saa[sat],
         )
         for k, sat in enumerate(sats)
@@ -597,6 +598,8 @@ def _run_power_thermal(
 
 
 def _vehicle_signals(
+    params: Params,
+    pole: F64,
     seed: int,
     view: ParamView,
     k: int,
@@ -622,6 +625,7 @@ def _vehicle_signals(
 
     r, v = traj.r[:, k], traj.v[:, k]
     pos, vel = gnss(stream("gnss"), view, t, r, v)
+    nav = navigate(view, nav_model(params, sat, pole), pos.t_s, pos.meas, vel.meas)
     volts = pack_voltage(stream("voltage"), view, t, eps.v_V)
     amps = pack_current(stream("current"), view, t, eps.i_A)
     soc_meas = soc_estimate(stream("soc"), view, volts.t_s, volts.meas, amps.meas,
@@ -630,6 +634,8 @@ def _vehicle_signals(
     return VehicleSignals(
         gnss_r=pos,
         gnss_v=vel,
+        nav_r=Sampled(pos.t_s, nav.r_km, pos.truth),
+        nav_v=Sampled(vel.t_s, nav.v_km_s, vel.truth),
         star_tracker=star_tracker(stream("star_tracker"), view, t, q[:, k], r, sun_u),
         imu=imu(stream("imu"), view, t, omega[:, k]),
         pack_voltage=volts,

@@ -200,6 +200,10 @@ def measurement_columns(run: MissionRun, params: Params) -> dict[str, Any]:
             pair(f"gnss_r_{a}_km", gi, sig.gnss_r.meas[:, i], sig.gnss_r.truth[:, i])
         for i, a in enumerate(_AXES):
             pair(f"gnss_v_{a}_km_s", gi, sig.gnss_v.meas[:, i], sig.gnss_v.truth[:, i])
+        for i, a in enumerate(_AXES):
+            pair(f"nav_r_{a}_km", gi, sig.nav_r.meas[:, i], sig.nav_r.truth[:, i])
+        for i, a in enumerate(_AXES):
+            pair(f"nav_v_{a}_km_s", gi, sig.nav_v.meas[:, i], sig.nav_v.truth[:, i])
         st = sig.star_tracker
         si = _tick_index(t, st.t_s)
         avail = np.zeros(n_t, dtype=bool)

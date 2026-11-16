@@ -103,3 +103,25 @@ def test_gnss_signatures(params: Params, faulted: dict[str, MissionRun]) -> None
     after = s.t_s >= run.fault.t_arm_s  # type: ignore[union-attr]
     assert e_m[~after].std() == pytest.approx(1.5, rel=0.15)
     assert e_m[after][-len(e_m[after]) // 8:].std() > 4.0 * 1.5  # near x5 at the end of the ramp
+
+
+def test_nav_solution_follows_the_fixes_not_the_truth(
+        nominal: MissionRun, faulted: dict[str, MissionRun]) -> None:
+    """Every vehicle has a navigation solution at each fix. Nominally it is closer to the truth
+    than the fix is; under gnss_jump the faulted vehicle's solution carries the offset, and the
+    other vehicles' solutions are untouched."""
+    for sat in nominal.sats:
+        s = nominal.signals[sat]
+        np.testing.assert_array_equal(s.nav_r.t_s, s.gnss_r.t_s)
+        fix = np.linalg.norm(s.gnss_r.meas - s.gnss_r.truth, axis=1)[60:]
+        nav = np.linalg.norm(s.nav_r.meas - s.nav_r.truth, axis=1)[60:]
+        assert nav.mean() < fix.mean()
+    run = faulted["gnss_jump"]
+    for other in run.sats:
+        if other != "SAT-2":
+            np.testing.assert_array_equal(run.signals[other].nav_r.meas,
+                                          nominal.signals[other].nav_r.meas)
+    s = run.signals["SAT-2"]
+    late = s.nav_r.t_s >= run.fault.t_arm_s + 3600.0  # type: ignore[union-attr]
+    off = (s.nav_r.meas - s.nav_r.truth)[late].mean(axis=0) * 1000.0
+    assert np.all(off > 5.0)  # of the 10 m on each axis

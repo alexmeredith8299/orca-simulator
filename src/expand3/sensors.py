@@ -57,6 +57,8 @@ class VehicleSignals:
 
     gnss_r: Sampled
     gnss_v: Sampled
+    nav_r: Sampled
+    nav_v: Sampled
     star_tracker: StarTrackerSignal
     imu: Sampled
     pack_voltage: Sampled

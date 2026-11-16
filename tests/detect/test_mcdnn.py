@@ -42,9 +42,8 @@ def test_trailing_sum_is_causal() -> None:
 
 
 def test_registry_names() -> None:
-    faults = ("mcd_f2", "mcdn_f8", "mcdn_f9", "mcdn_f10", "mcdn_wheels", "mcdn_burn")
-    assert set(MCDN) == {f"{f}{s}" for f in faults for s in ("", "_sig", "_sig_comms")} | {
-        "mcdn_gnss", "mcdn_gnss_sig"}
+    faults = ("mcd_f2", "mcdn_f8", "mcdn_f9", "mcdn_f10", "mcdn_wheels", "mcdn_burn", "mcdn_gnss")
+    assert set(MCDN) == {f"{f}{s}" for f in faults for s in ("", "_sig", "_sig_comms")}
     assert not set(detector_names("all")) & set(MCDN)
 
 
@@ -125,25 +124,31 @@ def test_the_faulted_vehicles_score_stands_out(tmp_path: Path, name: str, kind: 
     assert top[FAULT_VEHICLE[kind]] > 3.0 * max(others, 1.0), (kind, top)
 
 
-def test_gnss_hermite_miss_is_the_fix_noise_and_the_peer_miss_is_scaled_by_root_k(
+def test_gnss_miss_is_the_fix_minus_the_vehicles_own_solution_and_peers_add_theirs(
         tmp_path: Path) -> None:
     seed = make_batch(tmp_path, ["none"], kepler=True)[0]
     d = SeedData(tmp_path / f"seed_{seed:05d}")
-    own = MCDN["mcdn_gnss"](CFG, str(PARAMS_DIR)).samples(d, "SAT-1")  # type: ignore[attr-defined]
-    assert own.y.shape[1] == 3
-    assert 2.0 < own.y.std() < 4.0  # 1.5 m on both ends and 5 cm/s over 60 s, about 3 m
-    assert abs(own.y.mean()) < 0.3
-    peer = MCDN["mcdn_gnss_sig"](CFG, str(PARAMS_DIR)).samples(d, "SAT-1")  # type: ignore[attr-defined]
-    assert peer.y.shape[1] == 6
-    assert set(np.unique(peer.local)) == {2.0}  # three vehicles: two partners
-    assert 18.0 < peer.y[:, :3].std() < 24.0  # the 20 m receive noise
-    assert abs(peer.y[:, :3].mean()) < 0.5
+    det = MCDN["mcdn_gnss"](CFG, str(PARAMS_DIR))
+    own = det.samples(d, "SAT-1")  # type: ignore[attr-defined]
+    assert own.y.shape[1] == 6
+    m = d.measurements("SAT-1")
+    k = own.tick[0]
+    want = (m["gnss_r_x_km_meas"][k] - m["nav_r_x_km_meas"][k]) * 1000.0
+    assert own.y[0, 0] == pytest.approx(want)
+    assert own.y[:, :3].std() < 1.5  # the solution has averaged part of the fix noise away
+    block = det.signal_block(d, "SAT-1")  # type: ignore[attr-defined]
+    assert block.shape[1] == 18  # fix (6), solution (6), fix minus solution (6)
+    assert not np.isnan(block[k]).any()
+    sig = MCDN["mcdn_gnss_sig"](CFG, str(PARAMS_DIR))
+    assert sig.x(d, "SAT-1", own).shape[1] > det.x(d, "SAT-1", own).shape[1]  # type: ignore[attr-defined]
 
 
 @pytest.mark.slow
 @pytest.mark.parametrize(("name", "kind", "fid"), [
     ("mcdn_gnss", "gnss_noise", "gnss_noise"), ("mcdn_gnss_sig", "gnss_noise", "gnss_noise"),
-    ("mcdn_gnss_sig", "gnss_jump", "gnss_jump")])
+    ("mcdn_gnss_sig_comms", "gnss_noise", "gnss_noise"),
+    ("mcdn_gnss", "gnss_jump", "gnss_jump"), ("mcdn_gnss_sig", "gnss_jump", "gnss_jump"),
+    ("mcdn_gnss_sig_comms", "gnss_jump", "gnss_jump")])
 def test_the_gnss_faulted_vehicles_score_stands_out(tmp_path: Path, name: str, kind: str,
                                                     fid: str) -> None:
     seeds = make_batch(tmp_path, [*(["none"] * 6), kind], kepler=True)
