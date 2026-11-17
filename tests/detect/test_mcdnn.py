@@ -43,9 +43,9 @@ def test_trailing_sum_is_causal() -> None:
 
 def test_registry_names() -> None:
     faults = ("mcd_f2", "mcdn_f8", "mcdn_f9", "mcdn_f10", "mcdn_wheels", "mcdn_burn", "mcdn_gnss",
-              "mcdn_mag")
+              "mcdn_gnssraw", "mcdn_mag")
     assert set(MCDN) == {f"{f}{s}" for f in faults for s in ("", "_sig", "_sig_comms")} | {
-        "mcdn_txfade_sig", "mcdn_txfade_sig_comms"}
+        "mcdn_txfade_sig", "mcdn_txfade_sig_comms", "mcdn_gnssrel", "mcdn_gnssrel_comms"}
     assert not set(detector_names("all")) & set(MCDN)
 
 
@@ -145,12 +145,58 @@ def test_gnss_miss_is_the_fix_minus_the_vehicles_own_solution_and_peers_add_thei
     assert sig.x(d, "SAT-1", own).shape[1] > det.x(d, "SAT-1", own).shape[1]  # type: ignore[attr-defined]
 
 
+def test_gnssraw_uses_only_the_raw_fixes_and_peers_add_theirs(tmp_path: Path) -> None:
+    seed = make_batch(tmp_path, ["none"], kepler=True)[0]
+    d = SeedData(tmp_path / f"seed_{seed:05d}")
+    det = MCDN["mcdn_gnssraw"](CFG, str(PARAMS_DIR))
+    own = det.samples(d, "SAT-1")  # type: ignore[attr-defined]
+    m = d.measurements("SAT-1")
+    assert own.y.shape[1] == 3  # position change less the velocity trapezoid [m]
+    k = own.tick[0]
+    valid = np.flatnonzero(m["gnss_valid"] > 0.5)
+    before = valid[valid < k][-1]
+    dt = m["t_s"][k] - m["t_s"][before]
+    want = (m["gnss_r_x_km_meas"][k] - m["gnss_r_x_km_meas"][before]
+            - 0.5 * (m["gnss_v_x_km_s_meas"][k] + m["gnss_v_x_km_s_meas"][before]) * dt) * 1000.0
+    assert own.y[0, 0] == pytest.approx(want)
+    block = det.signal_block(d, "SAT-1")  # type: ignore[attr-defined]
+    assert block.shape[1] == 9  # fix position and velocity, residual
+    sig = MCDN["mcdn_gnssraw_sig"](CFG, str(PARAMS_DIR))
+    assert sig.x(d, "SAT-1", own).shape[1] > det.x(d, "SAT-1", own).shape[1]  # type: ignore[attr-defined]
+
+
+def test_gnssrel_sample_is_the_relative_fix_less_the_one_an_orbit_earlier(tmp_path: Path) -> None:
+    seed = make_batch(tmp_path, ["none"], kepler=True)[0]
+    d = SeedData(tmp_path / f"seed_{seed:05d}")
+    det = MCDN["mcdn_gnssrel"](CFG, str(PARAMS_DIR))
+    s = det.samples(d, "SAT-1")  # type: ignore[attr-defined]
+    assert s.y.shape[1] == 3
+    assert s.local.shape[1] == 10  # four relative vectors and the number of mates
+    assert len(s.t) > 100
+    m = {sat: d.measurements(sat) for sat in ("SAT-1", "SAT-2", "SAT-3")}
+
+    def rel(tick: int) -> float:
+        return float(np.mean([m["SAT-1"]["gnss_r_x_km_meas"][tick] - m[o]["gnss_r_x_km_meas"][tick]
+                              for o in ("SAT-2", "SAT-3")]) * 1000.0)
+
+    dt = float(np.median(np.diff(m["SAT-1"]["t_s"])))
+    period = det._period_ticks(dt, 2)  # type: ignore[attr-defined]
+    k = int(s.tick[0])
+    assert rel(k) - rel(k - period) == pytest.approx(s.y[0, 0], abs=1e-6)
+    assert rel(k - period) == pytest.approx(s.local[0, 0], abs=1e-6)
+    assert det.x(d, "SAT-1", s).shape[1] == 10  # type: ignore[attr-defined]
+
+
 @pytest.mark.slow
 @pytest.mark.parametrize(("name", "kind", "fid"), [
     ("mcdn_gnss", "gnss_noise", "gnss_noise"), ("mcdn_gnss_sig", "gnss_noise", "gnss_noise"),
     ("mcdn_gnss_sig_comms", "gnss_noise", "gnss_noise"),
     ("mcdn_gnss", "gnss_jump", "gnss_jump"), ("mcdn_gnss_sig", "gnss_jump", "gnss_jump"),
-    ("mcdn_gnss_sig_comms", "gnss_jump", "gnss_jump")])
+    ("mcdn_gnss_sig_comms", "gnss_jump", "gnss_jump"),
+    # the raw-fix detector does not see a held offset (it cancels between two fixes), so no jump
+    ("mcdn_gnssraw", "gnss_noise", "gnss_noise"), ("mcdn_gnssraw_sig", "gnss_noise", "gnss_noise"),
+    ("mcdn_gnssrel", "gnss_noise", "gnss_noise"), ("mcdn_gnssrel", "gnss_jump", "gnss_jump"),
+    ("mcdn_gnssrel_comms", "gnss_jump", "gnss_jump")])
 def test_the_gnss_faulted_vehicles_score_stands_out(tmp_path: Path, name: str, kind: str,
                                                     fid: str) -> None:
     seeds = make_batch(tmp_path, [*(["none"] * 6), kind], kepler=True)

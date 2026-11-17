@@ -21,6 +21,10 @@ and the GLR that fits the quantity scores the miss:
   sense its own transmit power (`McdTxFade`, `_sig` and `_sig_comms` only).
 - gnss_jump, gnss_noise (extended faults): the GNSS fix against the vehicle's own navigation
   solution (`McdGnss`), with the other vehicles' fixes and solutions in the multi-satellite forms.
+  `McdGnssRaw` is a learned detector on the raw fixes alone (position change less the velocity
+  trapezoid, no dynamics law), with the other vehicles' raw fixes in the multi-satellite forms.
+  `McdGnssRel` takes the cluster mates' relative fixes only, as one orbit's change in the
+  relative vector.
 
 Each has the single-vehicle form (the vehicle's own context features and its own inputs) and, with
 `_sig`, the multi-satellite form of `mcdmulti.py`: the context of all six vehicles and the other
@@ -446,7 +450,174 @@ class McdGnss(_Nn):
         return out
 
 
-# ---- tx_fade: the partners' received signal strength of a sender --------------------------
+class McdGnssRaw(_Nn):
+    """A learned detector on the raw fixes alone: no navigation solution and no dynamics law. The
+    sample is the change in position between the vehicle's consecutive fixes less the trapezoid
+    of its two velocity fixes over the interval (three axes, m). That is quadrature of two raw
+    signals, not a model of the orbit: what is left is the fix noise plus about 150 m of orbit
+    curvature that the network learns from the vehicle's own raw signals (the direction of its
+    fix and velocity, and the previous residual). A noisier receiver widens the miss. A held
+    offset cancels in a change between two fixes, so a step shows in the one change that spans it
+    and a slow ramp hardly at all.
+
+    In `_sig`, and `_sig_comms` through the links, the inputs add every other vehicle's raw fix
+    and its latest residual (the vehicle's own are masked). Receiver noise is independent between
+    vehicles, so a peer can predict only what the vehicles share.
+    """
+
+    name = "mcdn_gnssraw"
+    fault_ids = ("gnss_jump", "gnss_noise")
+    block_key = "gnssraw"
+    cols: tuple[str, ...] = ("miss_x_m", "miss_y_m", "miss_z_m")
+    overrides = (("mcd_epochs", 100), ("mcd_hidden", 32), ("mcd_sigma_floor", 1e-3))
+
+    @staticmethod
+    def _changes(m: dict[str, F64]) -> tuple[F64, F64, F64, IntArr]:
+        """Per consecutive pair of valid fixes, without pairs across an outage: the later fix
+        (position, velocity), the change in position less the trapezoid of the velocity fixes
+        [m], and the later tick."""
+        r = np.stack([m[f"gnss_r_{ax}_km_meas"] for ax in "xyz"], axis=1)
+        v = np.stack([m[f"gnss_v_{ax}_km_s_meas"] for ax in "xyz"], axis=1)
+        idx = np.flatnonzero(m["gnss_valid"] > 0.5)
+        if idx.size < 2:
+            return r[:0], v[:0], r[:0], idx[:0].astype(np.int64)
+        i0, i1 = idx[:-1], idx[1:]
+        dt = m["t_s"][i1] - m["t_s"][i0]
+        ok = dt <= 1.5 * float(np.median(dt))  # a pair across an outage is not a pair
+        miss = (r[i1] - r[i0] - 0.5 * (v[i0] + v[i1]) * dt[:, None]) * M_PER_KM
+        return r[i1][ok], v[i1][ok], miss[ok], i1[ok].astype(np.int64)
+
+    def signal_block(self, d: SeedData, sat: str) -> F64:
+        """Per vehicle, held between fixes: the fix and the latest residual."""
+        m = d.measurements(sat)
+        r, v, miss, tick = self._changes(m)
+        full = np.full((len(m["t_s"]), 9), np.nan)
+        full[tick] = np.concatenate([r, v, miss], axis=1)
+        idx, _ = hold(np.isfinite(full[:, 0]), 1.0)
+        return np.where((idx >= 0)[:, None], full[np.maximum(idx, 0)], np.nan)
+
+    def samples(self, d: SeedData, sat: str) -> Samples:
+        m = d.measurements(sat)
+        r, v, miss, tick = self._changes(m)
+        if len(tick) < 2:
+            return _empty(3, 9)
+        prev = np.concatenate([np.zeros((1, 3)), miss[:-1]], axis=0)
+        local = np.concatenate([r / np.linalg.norm(r, axis=1, keepdims=True),
+                                v / np.linalg.norm(v, axis=1, keepdims=True), prev], axis=1)
+        return Samples(m["t_s"][tick][1:], tick[1:], local[1:], miss[1:])  # the first has no prev
+
+    def score(self, d: SeedData, per: dict[str, tuple[Samples, F64, F64]]) -> list[Trace]:
+        out = []
+        for sat, (s, mean, std) in per.items():
+            z = np.nan_to_num((s.y - mean) / std)
+            shift = sum(gaussian_glr(z[:, j], 0.0, 1.0, self.cfg.nn_gnss_window)
+                        for j in range(z.shape[1]))
+            spread = variance_glr(np.mean(z**2, axis=1), self.cfg.nn_gnss_window, z.shape[1])
+            out += [Trace(sat, "gnss_jump", s.t, np.asarray(shift)),
+                    Trace(sat, "gnss_noise", s.t, spread)]
+        return out
+
+
+class McdGnssRel(_Nn):
+    """Relative raw fixes only: the vehicle's fix minus its cluster mates' fixes, from the same
+    tick, with nothing absolute as an input. A held offset on one receiver moves every relative
+    vector it is part of, and no mate's moves with it, which is the one way raw GPS can show it.
+
+    The sample is the mean over the mates present of (own fix - mate fix), as one minus the same
+    vector an orbit earlier (the relative orbit repeats with the orbital period, so the change
+    over an orbit is small and the network learns it to about the fix noise). The inputs are
+    relative too: that earlier vector, its change over the orbit before, and its slope. A step
+    shows for one orbit, until the vector an orbit earlier holds it too, and a ramp for as long as
+    it grows. A vehicle whose fixes carry a larger noise widens every relative vector it is in.
+
+    Instantaneous: every mate with a valid fix at the tick. `_comms`: only mates whose message
+    was delivered at that tick (F8 drops make gaps). The other cluster is out of range, so it
+    contributes nothing; a vehicle with no mate has no sample.
+    """
+
+    name = "mcdn_gnssrel"
+    fault_ids = ("gnss_jump", "gnss_noise")
+    block_key = "gnssrel"
+    cols: tuple[str, ...] = ("rel_x_m", "rel_y_m", "rel_z_m")
+    overrides = (("mcd_epochs", 100), ("mcd_hidden", 32), ("mcd_sigma_floor", 1e-3))
+    delivered_only = False
+
+    def signal_block(self, d: SeedData, sat: str) -> F64:
+        return np.zeros((len(d.measurements(sat)["t_s"]), 1))  # unused: the inputs are relative
+
+    def _period_ticks(self, dt_s: float, step: int) -> int:
+        """One orbit in ticks, to a whole number of fix intervals."""
+        assert self.params_dir is not None
+        p = load_params(self.params_dir).scenario
+        a = p.orbit.a_km
+        period = 2.0 * np.pi * np.sqrt(a**3 / p.constants.mu_km3_s2)
+        return int(max(step, step * round(period / (step * dt_s))))
+
+    def samples(self, d: SeedData, sat: str) -> Samples:
+        seed = self._seed(d)
+        t = seed["t"]
+        mates = [s for c in self._scenario().clusters if sat in c for s in c
+                 if s != sat and s in seed["feats"]]
+        m_own = d.measurements(sat)
+        r_own = np.stack([m_own[f"gnss_r_{ax}_km_meas"] for ax in "xyz"], axis=1)
+        have = m_own["gnss_valid"] > 0.5
+        if not mates or have.sum() < 3:
+            return _empty(3, 10)
+        step = int(np.median(np.diff(np.flatnonzero(have))))
+        rel = np.full((len(t), len(mates), 3), np.nan)
+        for j, s in enumerate(mates):
+            m = d.measurements(s)
+            both = have & (m["gnss_valid"] > 0.5)
+            if self.delivered_only:
+                both &= seed["delivered"][(s, sat)]
+            r = np.stack([m[f"gnss_r_{ax}_km_meas"] for ax in "xyz"], axis=1)
+            rel[both, j] = (r_own[both] - r[both]) * M_PER_KM
+        here = np.isfinite(rel[:, :, 0])  # (n, mates): the mates present at each tick
+        k = here.sum(axis=1)
+        period = self._period_ticks(float(np.median(np.diff(t))), step)
+
+        def at(lag: int) -> tuple[F64, NDArray[np.bool_]]:
+            """Mean relative vector over the mates present now, `lag` ticks earlier; ok where
+            every one of them was present then."""
+            sh = np.full_like(rel, np.nan)
+            sh[lag:] = rel[:-lag] if lag else rel
+            ok = np.all(~here | np.isfinite(sh[:, :, 0]), axis=1) & (k > 0)
+            mean = np.where(here[:, :, None], np.nan_to_num(sh), 0.0).sum(axis=1)
+            return mean / np.maximum(k, 1)[:, None], ok
+
+        now, ok0 = at(0)
+        y1, ok1 = at(period)
+        y2, ok2 = at(2 * period)
+        ya, oka = at(period - step)
+        yb, okb = at(period + step)
+        pick = np.flatnonzero(ok0 & ok1 & ok2 & oka & okb)
+        if not pick.size:
+            return _empty(3, 10)
+        local = np.concatenate([y1[pick], y1[pick] - y2[pick], ya[pick] - yb[pick],
+                                k[pick, None].astype(np.float64)], axis=1)
+        return Samples(t[pick], pick.astype(np.int64), local, (now - y1)[pick])
+
+    def x(self, d: SeedData, sat: str, s: Samples) -> F32:
+        return s.local.astype(np.float32)
+
+    def score(self, d: SeedData, per: dict[str, tuple[Samples, F64, F64]]) -> list[Trace]:
+        out = []
+        for sat, (s, mean, std) in per.items():
+            z = np.nan_to_num((s.y - mean) / std)
+            shift = sum(gaussian_glr(z[:, j], 0.0, 1.0, self.cfg.nn_gnss_window)
+                        for j in range(z.shape[1]))
+            spread = variance_glr(np.mean(z**2, axis=1), self.cfg.nn_gnss_window, z.shape[1])
+            out += [Trace(sat, "gnss_jump", s.t, np.asarray(shift)),
+                    Trace(sat, "gnss_noise", s.t, spread)]
+        return out
+
+
+class McdGnssRelComms(McdGnssRel):
+    name = "mcdn_gnssrel_comms"
+    delivered_only = True
+
+
+# ---- tx_fade: the partners received signal strength of a sender --------------------------
 class McdTxFade(_Nn):
     """A vehicle cannot sense its own transmit power, so a fade shows only in the partners'
     received signal strength of its messages. One sample per delivered message from the sender:
@@ -665,5 +836,7 @@ MCDN: dict[str, type[Detector]] = {
     k: v for base in (McdStrings, McdDrops, McdUpsets, McdDark, McdWheels, McdBurn)
     for k, v in _variants(base).items()}
 MCDN |= _variants(McdGnss)
+MCDN |= _variants(McdGnssRaw)
+MCDN |= {c.name: c for c in (McdGnssRel, McdGnssRelComms)}
 MCDN |= _variants(McdMag)
 MCDN |= {c.name: c for c in (McdTxFade, McdTxFadeComms)}
