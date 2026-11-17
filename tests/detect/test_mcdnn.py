@@ -42,8 +42,10 @@ def test_trailing_sum_is_causal() -> None:
 
 
 def test_registry_names() -> None:
-    faults = ("mcd_f2", "mcdn_f8", "mcdn_f9", "mcdn_f10", "mcdn_wheels", "mcdn_burn", "mcdn_gnss")
-    assert set(MCDN) == {f"{f}{s}" for f in faults for s in ("", "_sig", "_sig_comms")}
+    faults = ("mcd_f2", "mcdn_f8", "mcdn_f9", "mcdn_f10", "mcdn_wheels", "mcdn_burn", "mcdn_gnss",
+              "mcdn_mag")
+    assert set(MCDN) == {f"{f}{s}" for f in faults for s in ("", "_sig", "_sig_comms")} | {
+        "mcdn_txfade_sig", "mcdn_txfade_sig_comms"}
     assert not set(detector_names("all")) & set(MCDN)
 
 
@@ -159,3 +161,70 @@ def test_the_gnss_faulted_vehicles_score_stands_out(tmp_path: Path, name: str, k
     top = {t.sat_id: float(np.max(t.score)) for t in traces if t.fault_id == fid}
     others = max(v for s, v in top.items() if s != FAULT_VEHICLE[kind])
     assert top[FAULT_VEHICLE[kind]] > 3.0 * max(others, 1.0), (kind, top)
+
+
+def test_txfade_samples_are_the_partners_readings_of_the_sender_at_the_range_of_the_navs(
+        tmp_path: Path) -> None:
+    seed = make_batch(tmp_path, ["none"], kepler=True)[0]
+    d = SeedData(tmp_path / f"seed_{seed:05d}")
+    now = MCDN["mcdn_txfade_sig"](CFG, str(PARAMS_DIR)).samples(d, "SAT-2")  # type: ignore[attr-defined]
+    link = d.table("crosslink", ["sender", "delivered", "rssi_dBm"])
+    sent = (np.asarray(link.column("sender")) == "SAT-2") & np.asarray(
+        link.column("delivered"), dtype=bool)
+    assert len(now.t) == sent.sum()  # one sample per delivered message from the sender
+    assert now.y.shape[1] == 1
+    # the range from the two vehicles' navigation solutions gives the free-space level
+    r_km = np.exp(now.local[:, 0])
+    expect = 43.0 - 20.0 * np.log10(4.0 * np.pi * r_km * 1e3 * 2.2e9 / 299792458.0)
+    assert np.abs(now.y[:, 0] - expect).std() < 0.6  # the 0.5 dB reading error
+    assert abs((now.y[:, 0] - expect).mean()) < 0.1
+    # store and forward: a reading reaches the sender no earlier than it was taken
+    held = MCDN["mcdn_txfade_sig_comms"](CFG, str(PARAMS_DIR)).samples(d, "SAT-2")  # type: ignore[attr-defined]
+    assert np.all(held.t >= now.t[: len(held.t)] - 1e-9) or len(held.t) <= len(now.t)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("name", ["mcdn_txfade_sig", "mcdn_txfade_sig_comms"])
+def test_the_faded_senders_score_stands_out(tmp_path: Path, name: str) -> None:
+    seeds = make_batch(tmp_path, [*(["none"] * 6), "tx_fade"], kepler=True)
+    keep: dict[str, object] = {}
+    cfg = replace(CFG, mcd_epochs=40, mcd_batch=64)
+    run_detectors(tmp_path, [name], seeds[:6], seeds[6:], cfg, PARAMS_DIR, keep=keep)
+    traces = keep["traces"][seeds[6]][0][name]  # type: ignore[index]
+    top = {t.sat_id: float(np.max(t.score)) for t in traces if t.fault_id == "tx_fade"}
+    others = max(v for s, v in top.items() if s != "SAT-2")
+    assert top["SAT-2"] > 3.0 * max(others, 1.0), top
+
+
+def test_mag_samples_are_the_residual_against_the_onboard_model(tmp_path: Path) -> None:
+    seed = make_batch(tmp_path, ["none"])[0]
+    d = SeedData(tmp_path / f"seed_{seed:05d}")
+    det = MCDN["mcdn_mag"](CFG, str(PARAMS_DIR))
+    s = det.samples(d, "SAT-1")  # type: ignore[attr-defined]
+    assert s.y.shape[1] == 4  # three body axes (needs a tracker fix) and the magnitude
+    assert np.isnan(s.y[:, 0]).any()
+    assert np.isfinite(s.y[:, 3]).all()
+    assert abs(np.nanmean(s.y[:, 3])) < 400.0  # the shared disturbance, no more
+    block = det.signal_block(d, "SAT-1")  # type: ignore[attr-defined]
+    assert block.shape[1] == 4
+    sig = MCDN["mcdn_mag_sig"](CFG, str(PARAMS_DIR))
+    assert sig.x(d, "SAT-1", s).shape[1] > det.x(d, "SAT-1", s).shape[1]  # type: ignore[attr-defined]
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(("name", "kind"), [
+    ("mcdn_mag_sig", "mag_bias"), ("mcdn_mag_sig_comms", "mag_bias"),
+    ("mcdn_mag", "mag_noise"), ("mcdn_mag_sig", "mag_coupling")])
+def test_the_magnetometer_faulted_vehicles_score_stands_out(tmp_path: Path, name: str,
+                                                            kind: str) -> None:
+    seeds = make_batch(tmp_path, [*(["none"] * 6), kind])
+    keep: dict[str, object] = {}
+    cfg = replace(CFG, mcd_epochs=40, mcd_batch=64)
+    run_detectors(tmp_path, [name], seeds[:6], seeds[6:], cfg, PARAMS_DIR, keep=keep)
+    traces = keep["traces"][seeds[6]][0][name]  # type: ignore[index]
+    top = {t.sat_id: float(np.max(t.score)) for t in traces if t.fault_id == kind}
+    others = max(v for s, v in top.items() if s != "SAT-2")
+    # the slope on the current is the least specific of the three scores (a constant current
+    # looks like a shift), so it has the smallest margin
+    margin = 2.0 if kind == "mag_coupling" else 3.0
+    assert top["SAT-2"] > margin * max(others, 1.0), (kind, top)

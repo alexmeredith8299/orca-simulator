@@ -59,6 +59,9 @@ class VehicleSignals:
     gnss_v: Sampled
     nav_r: Sampled
     nav_v: Sampled
+    mag: Sampled
+    mag_model: Sampled
+    mag_model_abs: Sampled
     star_tracker: StarTrackerSignal
     imu: Sampled
     pack_voltage: Sampled
@@ -96,6 +99,23 @@ def gnss(rng: np.random.Generator, view: ParamView, t_s: F64, r_km: F64, v_km_s:
     offset = view.get_series("sensor_faults.gnss.offset_m", ts)[:, None] / M_PER_KM
     return (Sampled(ts, r_km[m] + dr * mult + offset, r_km[m].copy()),
             Sampled(ts, v_km_s[m] + dv * mult, v_km_s[m].copy()))
+
+
+def magnetometer(rng: np.random.Generator, view: ParamView, t_s: F64, b_body_nT: F64,
+                 current_A: F64) -> Sampled:
+    """Three-axis field, truth + N(0, sigma) per axis on the sampling grid (Phase C, not in the
+    spec). Extended faults: a bias on every axis (mag_bias), the noise times its multiplier
+    (mag_noise), and an error on every axis proportional to the pack current (mag_coupling)."""
+    m = every(t_s, view.get("signals.magnetometer.rate_s"))
+    ts = t_s[m]
+    sigma = view.get("signals.magnetometer.sigma_nT")
+    noise = rng.normal(0.0, sigma, (int(m.sum()), 3))
+    mult = view.get_series("sensor_faults.mag.noise_mult", ts)[:, None]
+    bias = view.get_series("sensor_faults.mag.bias_nT", ts)[:, None]
+    coupling = view.get_series("sensor_faults.mag.coupling_nT_per_A", ts)[:, None]
+    truth = b_body_nT[m]
+    return Sampled(ts, truth + noise * mult + bias + coupling * current_A[m][:, None],
+                   truth.copy())
 
 
 def tracker_basis(view: ParamView) -> F64:

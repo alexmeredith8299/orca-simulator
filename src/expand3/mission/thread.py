@@ -22,12 +22,14 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 
 import numpy as np
 from numpy.typing import NDArray
 
 from expand3.env.eclipse import shadow_fraction
 from expand3.env.frames import eci_to_ecef
+from expand3.env.geomag import FieldDisturbance, igrf_field_ecef_nt
 from expand3.env.ground import Station, elevation_deg, stations
 from expand3.env.sun import sun_eci
 from expand3.faults import FaultConfig, FaultLabel, Injector, draw_fault, draw_fault_extended
@@ -45,10 +47,12 @@ from expand3.mission.takes import (
 from expand3.params import Params, ParamView
 from expand3.sensors import (
     Sampled,
+    StarTrackerSignal,
     VehicleSignals,
     every,
     gnss,
     imu,
+    magnetometer,
     pack_current,
     pack_voltage,
     soc_estimate,
@@ -58,9 +62,10 @@ from expand3.sensors import (
     thermistor_noise,
 )
 from expand3.timebase import Clock, SeedDraws, draw_seed, rng
-from expand3.vehicle.attitude import quat_conj, quat_mul, quat_rotate
+from expand3.vehicle.attitude import quat_conj, quat_mul, quat_rotate, quat_to_dcm
 from expand3.vehicle.cdh import SaaHistory, saa_history
 from expand3.vehicle.eps import BATTERY_NODE, PAYLOAD_NODE, Eps, EpsHistory, EpsInputs, history
+from expand3.vehicle.magref import onboard_field
 from expand3.vehicle.nav import nav_model, navigate
 from expand3.vehicle.orbit import Forces, OrbitModel, initial_states, rk4_step
 from expand3.vehicle.payload import dark_current_e_s_px
@@ -318,10 +323,12 @@ def run_mission(
         n = int(np.flatnonzero(np.isclose(t, rec.t_take_s))[0])
         rec.payload_K = float(thermal[sat].node(PAYLOAD_NODE)[n])
         rec.dark_current_e_s_px = dark_current_e_s_px(views[sat].at(rec.t_take_s), rec.payload_K)
+    field = FieldDisturbance.draw(views[sats[0]], draws.seed)
     signals = {
         sat: _vehicle_signals(
-            params, pole, draws.seed, views[sat], k, t, traj, q, omega, sun_u, gate_pass, gate_take,
-            gate_slew, eps[sat], thermal[sat], therm_noise[sat], saa[sat],
+            params, pole, rot, draws.epoch_utc, field, draws.seed, views[sat], k, t, traj, q,
+            omega, sun_u, gate_pass, gate_take, gate_slew, eps[sat], thermal[sat], therm_noise[sat],
+            saa[sat],
         )
         for k, sat in enumerate(sats)
     }
@@ -597,9 +604,38 @@ def _run_power_thermal(
     return history(t, steps), ThermalHistory(t, list(th.names), temps)
 
 
+def _magnetic_signals(
+    view: ParamView, rng_mag: np.random.Generator, t: F64, rot: F64, epoch_utc: datetime,
+    field: FieldDisturbance, r_eci: F64, q_true: F64, current_A: F64, nav_r_km: F64, nav_t_s: F64,
+    tracker: StarTrackerSignal,
+) -> tuple[Sampled, Sampled, Sampled]:
+    """The magnetometer, the vehicle's onboard field model and its magnitude, on the magnetometer
+    grid (Phase C). Truth is IGRF plus the common disturbance at the true position, in the body
+    frame; the model is IGRF at the navigation position with the tracker's attitude."""
+    grid = every(t, view.get("signals.magnetometer.rate_s"))
+    n = np.flatnonzero(grid)
+    r_ecef = np.einsum("nij,nj->ni", rot[n], r_eci[n])
+    ideal = igrf_field_ecef_nt(r_ecef, epoch_utc)
+    b_eci = np.einsum("nji,nj->ni", rot[n], ideal + field.at(r_ecef, t[n]))
+    i_eci = np.einsum("nji,nj->ni", rot[n], ideal)
+    dcm = np.stack([quat_to_dcm(q_true[i]).T for i in n])
+    b_body = np.full((len(t), 3), np.nan)
+    b_body[n] = np.einsum("nij,nj->ni", dcm, b_eci)
+    ideal_body = np.einsum("nij,nj->ni", dcm, i_eci)
+    mag = magnetometer(rng_mag, view, t, b_body, current_A)
+    nav_i = np.searchsorted(nav_t_s, t[n])
+    track_i = np.searchsorted(tracker.t_s, t[n])
+    model, model_abs = onboard_field(nav_r_km[nav_i], rot[n], epoch_utc, tracker.q_meas[track_i])
+    return (mag, Sampled(t[n], model, ideal_body),
+            Sampled(t[n], model_abs, np.linalg.norm(ideal, axis=1)))
+
+
 def _vehicle_signals(
     params: Params,
     pole: F64,
+    rot: F64,
+    epoch_utc: datetime,
+    field: FieldDisturbance,
     seed: int,
     view: ParamView,
     k: int,
@@ -632,12 +668,19 @@ def _vehicle_signals(
     soc_meas = soc_estimate(stream("soc"), view, volts.t_s, volts.meas, amps.meas,
                             float(eps.soc[0]))
     burning = traj.burning[:, k]
+    tracker = star_tracker(stream("star_tracker"), view, t, q[:, k], r, sun_u)
+    mag, mag_model, mag_model_abs = _magnetic_signals(
+        view, stream("mag"), t, rot, epoch_utc, field, r, q[:, k], eps.i_A, nav.r_km, pos.t_s,
+        tracker)
     return VehicleSignals(
         gnss_r=pos,
         gnss_v=vel,
         nav_r=Sampled(pos.t_s, nav.r_km, pos.truth),
         nav_v=Sampled(vel.t_s, nav.v_km_s, vel.truth),
-        star_tracker=star_tracker(stream("star_tracker"), view, t, q[:, k], r, sun_u),
+        mag=mag,
+        mag_model=mag_model,
+        mag_model_abs=mag_model_abs,
+        star_tracker=tracker,
         imu=imu(stream("imu"), view, t, omega[:, k]),
         pack_voltage=volts,
         pack_current=amps,

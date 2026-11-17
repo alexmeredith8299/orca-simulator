@@ -204,6 +204,12 @@ def measurement_columns(run: MissionRun, params: Params) -> dict[str, Any]:
             pair(f"nav_r_{a}_km", gi, sig.nav_r.meas[:, i], sig.nav_r.truth[:, i])
         for i, a in enumerate(_AXES):
             pair(f"nav_v_{a}_km_s", gi, sig.nav_v.meas[:, i], sig.nav_v.truth[:, i])
+        mi = _tick_index(t, sig.mag.t_s)
+        for i, a in enumerate(_AXES):
+            pair(f"mag_{a}_nT", mi, sig.mag.meas[:, i], sig.mag.truth[:, i])
+        for i, a in enumerate(_AXES):
+            pair(f"mag_model_{a}_nT", mi, sig.mag_model.meas[:, i], sig.mag_model.truth[:, i])
+        pair("mag_model_abs_nT", mi, sig.mag_model_abs.meas, sig.mag_model_abs.truth)
         st = sig.star_tracker
         si = _tick_index(t, st.t_s)
         avail = np.zeros(n_t, dtype=bool)
@@ -365,6 +371,7 @@ def crosslink_columns(run: MissionRun) -> dict[str, Any]:
             "v_x_km_s_meas": log.v_meas_km_s[:, j, 0],
             "v_y_km_s_meas": log.v_meas_km_s[:, j, 1],
             "v_z_km_s_meas": log.v_meas_km_s[:, j, 2],
+            "rssi_dBm": log.rssi_dBm[:, j],
             "age_s": log.age_s[(b, a)],
             "receipts": log.receipts[b],
         }

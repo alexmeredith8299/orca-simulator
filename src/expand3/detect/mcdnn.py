@@ -15,6 +15,10 @@ and the GLR that fits the quantity scores the miss:
 - F9: per block, the upset count while inside the SAA (Poisson). The expected count is the
   network's mean plus its epistemic std.
 - F10: per take, log2 of the dark current from the payload temperature (Gaussian, one sample).
+- mag_bias, mag_noise, mag_coupling (extended faults): the magnetometer against the vehicle's
+  onboard field model, with the other vehicles' residuals in the multi-satellite forms.
+- tx_fade (extended fault): the partners' received signal strength of the sender, which cannot
+  sense its own transmit power (`McdTxFade`, `_sig` and `_sig_comms` only).
 - gnss_jump, gnss_noise (extended faults): the GNSS fix against the vehicle's own navigation
   solution (`McdGnss`), with the other vehicles' fixes and solutions in the multi-satellite forms.
 
@@ -442,6 +446,168 @@ class McdGnss(_Nn):
         return out
 
 
+# ---- tx_fade: the partners' received signal strength of a sender --------------------------
+class McdTxFade(_Nn):
+    """A vehicle cannot sense its own transmit power, so a fade shows only in the partners'
+    received signal strength of its messages. One sample per delivered message from the sender:
+    the reading, predicted from the range of the two vehicles' navigation solutions (free-space
+    loss, omni antennas), so the network learns the level at each range. The sample's scores of
+    one tick are combined across the partners (their misses divided by the root of their number)
+    and a GLR scores a fall.
+
+    `mcdn_txfade_sig` takes every reading when it is made. `_comms` lets a reading reach the
+    sender only on the next tick a message from that partner is delivered to it, the crosslink
+    path in `comms.py`; a reading with no later delivery never arrives. Alone, a vehicle has no
+    reading of its own transmission, so there is no single-vehicle form.
+    """
+
+    name = "mcdn_txfade_sig"
+    fault_ids = ("tx_fade",)
+    block_key = "txfade"
+    cols: tuple[str, ...] = ("rssi_dBm",)
+    overrides = (("mcd_epochs", 100), ("mcd_hidden", 32), ("mcd_sigma_floor", 0.05))
+    signals = True
+
+    def x(self, d: SeedData, sat: str, s: Samples) -> F32:
+        return s.local.astype(np.float32)
+
+    @staticmethod
+    def _nav_position(d: SeedData, sat: str, ticks: IntArr, dt_s: float) -> F64:
+        """The vehicle's navigation position at each tick, the latest solution carried forward
+        with its velocity (NaN before the first solution)."""
+        m = d.measurements(sat)
+        r = np.stack([m[f"nav_r_{a}_km_meas"] for a in "xyz"], axis=1)
+        v = np.stack([m[f"nav_v_{a}_km_s_meas"] for a in "xyz"], axis=1)
+        idx, _ = hold(m["gnss_valid"] > 0.5, dt_s)
+        i = idx[ticks]
+        pos = r[np.maximum(i, 0)] + v[np.maximum(i, 0)] * ((ticks - i) * dt_s)[:, None]
+        return np.where((i >= 0)[:, None], pos, np.nan)
+
+    def samples(self, d: SeedData, sat: str) -> Samples:
+        grid = d.measurements(sat)["t_s"]
+        dt = float(np.median(np.diff(grid)))
+        link = d.table("crosslink", ["t_s", "sender", "receiver", "delivered", "rssi_dBm"])
+        t_l = np.asarray(link.column("t_s"), dtype=np.float64)
+        sender, receiver = (np.asarray(link.column(c)) for c in ("sender", "receiver"))
+        ok = np.asarray(link.column("delivered"), dtype=bool)
+        rssi = np.asarray(link.column("rssi_dBm"), dtype=np.float64)
+        rows: list[tuple[F64, IntArr, F64, F64]] = []
+        for rx in sorted(set(receiver[sender == sat])):
+            sel = (sender == sat) & (receiver == rx) & ok
+            tick = np.searchsorted(grid, t_l[sel]).astype(np.int64)
+            back = np.zeros(len(grid), dtype=bool)  # a message from the receiver reaches the sender
+            back[np.searchsorted(grid, t_l[(sender == rx) & (receiver == sat) & ok])] = True
+            avail = tick
+            if self.comms:
+                later = np.flatnonzero(back)
+                at = np.searchsorted(later, tick)
+                known = at < len(later)
+                tick, avail = tick[known], later[at[known]].astype(np.int64)
+                sel_idx = np.flatnonzero(sel)[known]
+            else:
+                sel_idx = np.flatnonzero(sel)
+            rng_km = np.linalg.norm(self._nav_position(d, sat, tick, dt)
+                                    - self._nav_position(d, rx, tick, dt), axis=1)
+            keep = np.isfinite(rng_km) & (rng_km > 0.0) & np.isfinite(rssi[sel_idx])
+            rows.append((grid[avail][keep], avail[keep], rng_km[keep], rssi[sel_idx][keep]))
+        if not rows or not sum(len(r[0]) for r in rows):
+            return _empty(1, 2)
+        t = np.concatenate([r[0] for r in rows])
+        order = np.argsort(t, kind="stable")
+        km = np.concatenate([r[2] for r in rows])[order]
+        local = np.stack([np.log(km), 20.0 * np.log10(km) / 100.0], axis=1)
+        return Samples(t[order], np.concatenate([r[1] for r in rows])[order], local,
+                       np.concatenate([r[3] for r in rows])[order, None])
+
+    def score(self, d: SeedData, per: dict[str, tuple[Samples, F64, F64]]) -> list[Trace]:
+        out = []
+        for sat, (s, mean, std) in per.items():
+            z = np.nan_to_num((s.y[:, 0] - mean[:, 0]) / std[:, 0])
+            t_u, inv = np.unique(s.t, return_inverse=True)
+            total = np.bincount(inv, weights=z)
+            count = np.bincount(inv)
+            score = gaussian_glr(total / np.sqrt(count), 0.0, 1.0, self.cfg.nn_txfade_window,
+                                 side="down")
+            out.append(Trace(sat, "tx_fade", t_u, np.asarray(score)))
+        return out
+
+
+class McdTxFadeComms(McdTxFade):
+    name = "mcdn_txfade_sig_comms"
+    comms = True
+
+
+# ---- mag_bias, mag_noise, mag_coupling: the field against the onboard model ---------------
+class McdMag(_Nn):
+    """The measured field minus the vehicle's onboard IGRF model: three body-axis residuals (only
+    where a star-tracker fix gave the model an attitude) and the magnitude residual (always). The
+    true field carries a disturbance the model lacks, so a healthy residual is a few hundred nT of
+    drift that one vehicle cannot tell from a bias. In `_sig`, and `_sig_comms` through the links,
+    the other vehicles' residuals are inputs: cluster mates cross nearly the same disturbance, so
+    the network predicts it and what is left is the sensor.
+
+    Three scores from the standardised residual: the shift (mag_bias), the slope on the vehicle's
+    own pack current (mag_coupling), and the variance of its step-to-step change (mag_noise),
+    which the smooth disturbance feeds little. The step is scaled by the sensor's own noise, so a
+    healthy vehicle scores near 1 and a noisier one above it.
+    """
+
+    name = "mcdn_mag"
+    fault_ids = ("mag_bias", "mag_coupling", "mag_noise")
+    block_key = "mag"
+    cols: tuple[str, ...] = ("res_x_nT", "res_y_nT", "res_z_nT", "res_abs_nT")
+    overrides = (("mcd_epochs", 100), ("mcd_hidden", 32), ("mcd_sigma_floor", 1.0))
+
+    def _noise_sigma(self) -> float:
+        """The magnetometer's noise (1 sigma, per axis) from the parameters."""
+        assert self.params_dir is not None
+        extra = load_params(self.params_dir).links.signals["magnetometer"].model_extra
+        assert extra is not None
+        return float(extra["sigma_nT"])
+
+    @staticmethod
+    def _residual(m: dict[str, F64]) -> F64:
+        """(n, 4): body-axis residuals (NaN without a model) and magnitude residual, NaN off the
+        magnetometer's own sampling grid."""
+        meas = np.stack([m[f"mag_{a}_nT_meas"] for a in "xyz"], axis=1)
+        model = np.stack([m[f"mag_model_{a}_nT_meas"] for a in "xyz"], axis=1)
+        mag = np.linalg.norm(meas, axis=1) - m["mag_model_abs_nT_meas"]
+        return np.concatenate([meas - model, mag[:, None]], axis=1)
+
+    def signal_block(self, d: SeedData, sat: str) -> F64:
+        """The residuals held between the magnetometer's samples."""
+        res = self._residual(d.measurements(sat))
+        idx, _ = hold(np.isfinite(res[:, 3]), 1.0)
+        return np.where((idx >= 0)[:, None], res[np.maximum(idx, 0)], np.nan)
+
+    def samples(self, d: SeedData, sat: str) -> Samples:
+        m = d.measurements(sat)
+        res = self._residual(m)
+        pick = np.flatnonzero(np.isfinite(res[:, 3]))[self.cfg.nn_gnss_window:]
+        if not pick.size:
+            return _empty(4, 2)
+        amps = np.nan_to_num(m["pack_i_A_meas"][pick])
+        local = np.stack([m["mag_model_abs_nT_meas"][pick] / 1.0e4, amps], axis=1)
+        return Samples(m["t_s"][pick], pick.astype(np.int64), local, res[pick],
+                       {"amps": amps})
+
+    def score(self, d: SeedData, per: dict[str, tuple[Samples, F64, F64]]) -> list[Trace]:
+        out = []
+        w = self.cfg.nn_mag_window
+        for sat, (s, mean, std) in per.items():
+            z = np.nan_to_num((s.y - mean) / std)
+            amps = s.aux["amps"]
+            shift = sum(gaussian_glr(z[:, j], 0.0, 1.0, w) for j in range(4))
+            slope = sum(slope_glr(z[:, j], amps, 1.0, w) for j in range(4))
+            miss = s.y[:, 3] - mean[:, 3]  # [nT], what the network leaves
+            step = np.diff(miss, prepend=miss[0]) / (np.sqrt(2.0) * self._noise_sigma())
+            spread = variance_glr(step**2, w, 1)
+            out += [Trace(sat, "mag_bias", s.t, np.asarray(shift)),
+                    Trace(sat, "mag_coupling", s.t, np.asarray(slope)),
+                    Trace(sat, "mag_noise", s.t, np.asarray(spread))]
+        return out
+
+
 # ---- F2: string power, an LSTM like the thermal detectors ------------------------------------
 class McdStrings(_MultiView, McdThermal):
     """F2: each string's power while sunlit, scored for a drop."""
@@ -499,3 +665,5 @@ MCDN: dict[str, type[Detector]] = {
     k: v for base in (McdStrings, McdDrops, McdUpsets, McdDark, McdWheels, McdBurn)
     for k, v in _variants(base).items()}
 MCDN |= _variants(McdGnss)
+MCDN |= _variants(McdMag)
+MCDN |= {c.name: c for c in (McdTxFade, McdTxFadeComms)}

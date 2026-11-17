@@ -77,6 +77,7 @@ def navigate(view: ParamView, model: OrbitModel, t_s: F64, r_fix_km: F64, v_fix_
     (n, 3) is the thrust the vehicle ordered at each time of `t_cmd_s`, held until the next."""
     step_s = view.get("signals.nav.step_s")
     accel_sigma = view.get("signals.nav.accel_sigma_m_s2") / M_PER_KM  # km/s^2
+    relinearize = round(view.get("signals.nav.linearize_every_fixes"))
     scale_sigma = view.get("signals.nav.drag_scale_sigma")
     scale_walk = view.get("signals.nav.drag_scale_walk_per_sqrt_s")
     sig_r = view.get("signals.gnss.pos_sigma_m") / M_PER_KM
@@ -92,9 +93,11 @@ def navigate(view: ParamView, model: OrbitModel, t_s: F64, r_fix_km: F64, v_fix_
         out: F64 = (full - no_drag.accel(r[None, :], v[None, :]))[0]
         return out
 
-    def deriv(y: F64, a_thr: F64) -> F64:
+    def deriv(y: F64, a_thr: F64, a_drag: F64) -> F64:
+        """The drag acceleration is held at its value at the start of the fix interval (it
+        changes by well under a percent in 60 s) and scaled by the state."""
         r, v, scale = y[:_AXES], y[_AXES:_DIM], y[_DIM]
-        acc = no_drag.accel(r[None, :], v[None, :])[0] + scale * drag_accel(r, v) + a_thr
+        acc = no_drag.accel(r[None, :], v[None, :])[0] + scale * a_drag + a_thr
         return np.concatenate([v, acc, [0.0]])
 
     n = len(t_s)
@@ -106,20 +109,25 @@ def navigate(view: ParamView, model: OrbitModel, t_s: F64, r_fix_km: F64, v_fix_
     cov[:_DIM, :_DIM] = meas_cov
     cov[_DIM, _DIM] = scale_sigma**2
     r_out[0], v_out[0] = x[:_AXES], x[_AXES:_DIM]
+    dt_phi = -1.0
     for i in range(1, n):
         dt = float(t_s[i] - t_s[i - 1])
         steps = max(round(dt / step_s), 1)
         h = dt / steps
-        # transition: the gravity gradient and the drag acceleration per unit scale
-        a = np.zeros((_N_STATE, _N_STATE))
-        a[:_AXES, _AXES:_DIM] = np.eye(_AXES)
-        a[_AXES:_DIM, :_AXES] = _gravity_gradient(model, x[:_AXES], x[_AXES:_DIM])
-        a[_AXES:_DIM, _DIM] = drag_accel(x[:_AXES], x[_AXES:_DIM])
-        phi = expm(a * dt)
+        if (i - 1) % relinearize == 0 or dt != dt_phi:
+            # transition: the gravity gradient and the drag acceleration per unit scale; both
+            # change slowly along the orbit, so they are refreshed every few fixes
+            a = np.zeros((_N_STATE, _N_STATE))
+            a[:_AXES, _AXES:_DIM] = np.eye(_AXES)
+            a[_AXES:_DIM, :_AXES] = _gravity_gradient(model, x[:_AXES], x[_AXES:_DIM])
+            a_drag = drag_accel(x[:_AXES], x[_AXES:_DIM])
+            a[_AXES:_DIM, _DIM] = a_drag
+            phi = expm(a * dt)
+            dt_phi = dt
         for j in range(steps):
             k = max(int(np.searchsorted(t_cmd_s, t_s[i - 1] + j * h, side="right")) - 1, 0)
             a_thr = a_cmd_m_s2[k] / M_PER_KM
-            x = rk4_step(partial(deriv, a_thr=a_thr), x, h)
+            x = rk4_step(partial(deriv, a_thr=a_thr, a_drag=a_drag), x, h)
         g = np.concatenate([np.eye(_AXES) * dt**2 / 2.0, np.eye(_AXES) * dt])
         noise = np.zeros((_N_STATE, _N_STATE))
         noise[:_DIM, :_DIM] = accel_sigma**2 * (g @ g.T)

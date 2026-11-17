@@ -526,6 +526,29 @@ class Crosslink(_Model):
     drop_probability: float = Field(ge=0, le=1)
 
 
+class LinkBudget(_Model):
+    """Crosslink received-signal-strength budget (not in the spec; docs/extended-faults-plan.md,
+    Phase B). Omni antennas, free-space loss at the true range."""
+
+    tx_power_dBm: float
+    tx_gain_dBi: float
+    rx_gain_dBi: float
+    frequency_GHz: float
+    rssi_sigma_dB: float
+
+
+class FieldDisturbanceParams(_Model):
+    """The common disturbance on the true magnetic field (not in the spec; Phase C): a sum of
+    smooth random waves in the Earth-fixed frame."""
+
+    rms_nT: float
+    modes: int
+    wavelength_min_km: float
+    wavelength_max_km: float
+    period_min_h: float
+    period_max_h: float
+
+
 class Saa(_Model):
     boundary_nT: float
     field_model: str
@@ -550,6 +573,8 @@ class Signal(_Model):
 
 class LinksSaaImager(_Model):
     crosslink: Crosslink
+    link_budget: LinkBudget
+    field_disturbance: FieldDisturbanceParams
     saa: Saa
     edge_computer_reboot_s: float
     cdh_upsets: CdhUpsets

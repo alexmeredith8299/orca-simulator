@@ -15,7 +15,8 @@ ARM_S = 70000.0
 TAKE_S = 80000.0
 LAMBDA_IN = 5.5e-4
 D0, T_REF, DT_D = 10.0, 293.15, 6.5
-FAULT_VEHICLE = {"gnss_jump": "SAT-2", "gnss_noise": "SAT-2",
+FAULT_VEHICLE = {"gnss_jump": "SAT-2", "gnss_noise": "SAT-2", "tx_fade": "SAT-2",
+                 "mag_bias": "SAT-2", "mag_noise": "SAT-2", "mag_coupling": "SAT-2",
                  "F1": "SAT-2", "F2": "SAT-2", "F3": "SAT-3", "F4": "SAT-3", "F5": "SAT-2",
                  "F6": "SAT-2", "F7": "SAT-2", "F8": "SAT-2", "F9": "SAT-2", "F10": "SAT-2"}
 MU, A_KM, PERIOD_S = 398600.4418, 6903.137, 5700.0
@@ -85,6 +86,38 @@ def _kepler(t: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
     v = A_KM * w * np.stack([-np.sin(u), np.cos(u) * np.cos(INCL), np.cos(u) * np.sin(INCL)],
                             axis=1)
     return r, v
+
+
+def _mag_disturbance(t: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    """A smooth field error shared by every vehicle, about 300 nT rms, drifting over hours."""
+    out = np.zeros((t.size, 3))
+    for period_h in (1.5, 3.0, 5.0, 8.0):
+        out += rng.normal(0.0, 130.0, 3) * np.sin(2 * np.pi * t[:, None] / (period_h * 3600.0)
+                                                  + rng.uniform(0.0, 6.28, 3))
+    return out
+
+
+def _mag(t: np.ndarray, k: int, fault: str, faulted: bool, common: np.ndarray,
+         amps: np.ndarray, rng: np.random.Generator) -> dict[str, np.ndarray]:
+    """Magnetometer and onboard-model columns on every other tick: the model is the ideal field,
+    the truth adds the common disturbance (plus 30 nT of the vehicle's own), the reading 30 nT of
+    noise, and the faults of the table from ARM_S (bias 300 nT, noise x5, 100 nT per A)."""
+    ideal = np.array([20000.0, -5000.0, 30000.0]) + 3000.0 * np.sin(
+        2 * np.pi * t[:, None] / PERIOD_S + 0.03 * k + np.array([0.0, 1.0, 2.0]))
+    own = 30.0 * np.sin(2 * np.pi * t[:, None] / 14000.0 + k)
+    post = ((t >= ARM_S) & faulted)[:, None]
+    mult = np.where(post & (fault == "mag_noise"), 5.0, 1.0)
+    bias = np.where(post & (fault == "mag_bias"), 300.0, 0.0)
+    coupling = np.where(post & (fault == "mag_coupling"), 100.0 * amps[:, None], 0.0)
+    meas = ideal + common + own + 30.0 * rng.standard_normal((t.size, 3)) * mult + bias + coupling
+    on = np.arange(t.size) % 2 == 0
+    tracker = on & (rng.random(t.size) < 0.5)
+    out: dict[str, np.ndarray] = {}
+    for i, ax in enumerate("xyz"):
+        out[f"mag_{ax}_nT_meas"] = np.where(on, meas[:, i], np.nan)
+        out[f"mag_model_{ax}_nT_meas"] = np.where(tracker, ideal[:, i], np.nan)
+    out["mag_model_abs_nT_meas"] = np.where(on, np.linalg.norm(ideal, axis=1), np.nan)
+    return out
 
 
 def _gnss_kepler(t: np.ndarray, k: int, fault: str, faulted: bool, rng: np.random.Generator,
@@ -183,9 +216,19 @@ def make_seed(out: Path, seed: int, fault: str, kepler: bool = False) -> Path:
            else _gnss(t, k, fault, sat == vehicle, sat, nav_rng) for k, sat in enumerate(SATS)]
     for name in nav[0]:
         cols[name] = [v for fixes in nav for v in fixes[name]]
+    mag_rng = np.random.default_rng(seed + 40_000)  # its own stream, as the fixes
+    common = _mag_disturbance(t, mag_rng)
+    mags = [_mag(t, k, fault, sat == vehicle, common,
+                 np.array(cols["pack_i_A_meas"][k * n:(k + 1) * n]), mag_rng)
+            for k, sat in enumerate(SATS)]
+    for name in mags[0]:
+        cols[name] = [v for m in mags for v in m[name]]
     pq.write_table(pa.table(cols), d / "measurements.parquet")
 
     link: dict[str, list] = {k: [] for k in ("t_s", "sender", "receiver", "sent", "delivered")}
+    if kepler:
+        link["rssi_dBm"] = []
+    rssi_rng = np.random.default_rng(seed + 30_000)  # its own stream, as the fixes
     for a in SATS:
         for b in SATS:
             if a == b:
@@ -198,6 +241,12 @@ def make_seed(out: Path, seed: int, fault: str, kepler: bool = False) -> Path:
             link["receiver"] += [b] * n
             link["sent"] += [True] * n
             link["delivered"] += list(rng.random(n) >= p_drop)
+            if kepler:  # 37 dBm and 3 dBi each end, 2.2 GHz free space, 0.5 dB reading error
+                dist = np.linalg.norm(_kepler(t, SATS.index(a))[0] - _kepler(t, SATS.index(b))[0],
+                                      axis=1)
+                fspl = 20.0 * np.log10(4.0 * np.pi * dist * 1e3 * 2.2e9 / 299792458.0)
+                fade = np.where(post & (fault == "tx_fade") & (a == vehicle), 6.0, 0.0)
+                link["rssi_dBm"] += list(43.0 - fspl - fade + 0.5 * rssi_rng.standard_normal(n))
     pq.write_table(pa.table(link), d / "crosslink.parquet")
 
     take_rows, wheel_rows = [], []

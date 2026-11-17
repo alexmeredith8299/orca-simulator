@@ -16,6 +16,8 @@ LEAD_S = 10_000.0
 DURATION_S = 36 * S_PER_HOUR
 IMU_FAULTS = ["gyro_bias", "gyro_scale", "gyro_noise", "gyro_stuck"]
 GNSS_FAULTS = ["gnss_jump", "gnss_noise"]
+RADIO_FAULTS = ["tx_fade"]
+MAG_FAULTS = ["mag_bias", "mag_noise", "mag_coupling"]
 
 
 @pytest.fixture(scope="module")
@@ -28,7 +30,7 @@ def faulted(params: Params) -> dict[str, MissionRun]:
     return {
         fid: run_mission(params, SEED, duration_s=DURATION_S,
                          fault=FaultConfig(mode="forced", fault_id=fid, lead_s=LEAD_S))
-        for fid in [*IMU_FAULTS, *GNSS_FAULTS]
+        for fid in [*IMU_FAULTS, *GNSS_FAULTS, *RADIO_FAULTS, *MAG_FAULTS]
     }
 
 
@@ -125,3 +127,87 @@ def test_nav_solution_follows_the_fixes_not_the_truth(
     late = s.nav_r.t_s >= run.fault.t_arm_s + 3600.0  # type: ignore[union-attr]
     off = (s.nav_r.meas - s.nav_r.truth)[late].mean(axis=0) * 1000.0
     assert np.all(off > 5.0)  # of the 10 m on each axis
+
+
+def test_tx_fade_lowers_the_senders_readings_after_arm(
+        params: Params, nominal: MissionRun, faulted: dict[str, MissionRun]) -> None:
+    """The fade changes only RSSI: the sender's outgoing readings drop by its depth after arm,
+    nothing else on the link or in the vehicle moves, and no signal of the sender reports it."""
+    run = faulted["tx_fade"]
+    assert run.fault is not None
+    sat = params.faults.extended["tx_fade"].vehicle
+    assert run.crosslink is not None
+    assert nominal.crosslink is not None
+    depth = params.faults.extended["tx_fade"].set_to
+    for j, (a, _b) in enumerate(run.crosslink.pairs):
+        ok = run.crosslink.delivered[:, j]
+        diff = (run.crosslink.rssi_dBm - nominal.crosslink.rssi_dBm)[ok, j]
+        after = run.crosslink.t_s[ok] >= run.fault.t_arm_s + 3600.0
+        if a == sat:
+            assert diff[after].mean() < -0.8 * depth  # the step has reached full depth
+            assert np.allclose(diff[run.crosslink.t_s[ok] < run.fault.t_arm_s], 0.0)
+        else:
+            assert np.allclose(diff, 0.0)
+    np.testing.assert_array_equal(run.crosslink.delivered, nominal.crosslink.delivered)
+    np.testing.assert_array_equal(run.crosslink.r_meas_km, nominal.crosslink.r_meas_km)
+
+
+def _resid_abs(run: MissionRun, sat: str) -> np.ndarray:
+    """Measured field magnitude minus the vehicle's model magnitude, per magnetometer sample."""
+    sig = run.signals[sat]
+    return np.linalg.norm(sig.mag.meas, axis=1) - sig.mag_model_abs.meas
+
+
+def test_the_true_field_carries_a_disturbance_common_to_the_cluster(
+        params: Params, nominal: MissionRun) -> None:
+    """The sensor reads the true field to its own noise, the model lacks the disturbance, and
+    that part of the residual is shared by cluster mates and not by the other cluster."""
+    sigma = params.links.signals["magnetometer"].model_extra["sigma_nT"]  # type: ignore[index]
+    for sat in nominal.sats:
+        sig = nominal.signals[sat]
+        assert np.abs(np.nanstd(sig.mag.meas - sig.mag.truth) / sigma - 1.0) < 0.05
+        assert np.isnan(sig.mag_model.meas).any()  # no tracker fix on some samples
+    rms = np.sqrt(np.mean(_resid_abs(nominal, "SAT-1") ** 2))
+    assert 100.0 < rms < 600.0  # about the disturbance rms along the field
+    a, b, c = (_resid_abs(nominal, s) for s in ("SAT-1", "SAT-2", "SAT-5"))
+    assert np.corrcoef(a, b)[0, 1] > 0.5
+    assert abs(np.corrcoef(a, c)[0, 1]) < np.corrcoef(a, b)[0, 1]
+
+
+@pytest.mark.parametrize("fid", MAG_FAULTS)
+def test_mag_faults_change_only_the_faulted_magnetometer_after_arm(
+        params: Params, nominal: MissionRun, faulted: dict[str, MissionRun], fid: str) -> None:
+    run = faulted[fid]
+    assert run.fault is not None
+    sat = params.faults.extended[fid].vehicle
+    for other in run.sats:  # the field and the vehicle are the same; only the sensor differs
+        np.testing.assert_array_equal(run.signals[other].mag.truth,
+                                      nominal.signals[other].mag.truth)
+        if other != sat:
+            np.testing.assert_array_equal(run.signals[other].mag.meas,
+                                          nominal.signals[other].mag.meas)
+    a, b = run.signals[sat].mag, nominal.signals[sat].mag
+    before = a.t_s < run.fault.t_arm_s
+    np.testing.assert_array_equal(a.meas[before], b.meas[before])
+    assert not np.array_equal(a.meas[~before], b.meas[~before])
+
+
+def test_mag_fault_signatures(params: Params, nominal: MissionRun,
+                              faulted: dict[str, MissionRun]) -> None:
+    run = faulted["mag_bias"]
+    sat = params.faults.extended["mag_bias"].vehicle
+    d = run.signals[sat].mag.meas - nominal.signals[sat].mag.meas
+    late = run.signals[sat].mag.t_s >= run.fault.t_arm_s  # type: ignore[union-attr]
+    np.testing.assert_allclose(d[late], 300.0, atol=1e-9)
+    run = faulted["mag_noise"]
+    sat = params.faults.extended["mag_noise"].vehicle
+    d = run.signals[sat].mag.meas - nominal.signals[sat].mag.meas
+    late = run.signals[sat].mag.t_s >= run.fault.t_arm_s  # type: ignore[union-attr]
+    assert d[late][-len(d[late]) // 8:].std() > 4.0 * d[~late].std() + 1.0  # near x5 at the end
+    run = faulted["mag_coupling"]
+    sat = params.faults.extended["mag_coupling"].vehicle
+    d = (run.signals[sat].mag.meas - nominal.signals[sat].mag.meas)[:, 0]
+    i = run.signals[sat].mag_model_abs.t_s
+    amps = np.interp(i, run.t_s, run.eps[sat].i_A)
+    late = i >= run.fault.t_arm_s  # type: ignore[union-attr]
+    np.testing.assert_allclose(d[late], 100.0 * amps[late], atol=1e-6)

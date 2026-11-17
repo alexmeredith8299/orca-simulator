@@ -1,5 +1,12 @@
 # Source: EXPAND.3 Phase I spec, Parameters > Links, SAA, C&DH, imager; Signals table.
 crosslink: {range_km: 1500, cadence: control_tick, rx_noise_pos_m: 20, rx_noise_vel_m_s: 0.02, drop_probability: 0}
+# Crosslink received signal strength. Not in the spec; default, spec silent: a 5 W transmitter, 3 dBi
+# antennas at S band and a 0.5 dB reading error (about -113 dBm at 1000 km).
+link_budget: {tx_power_dBm: 37, tx_gain_dBi: 3, rx_gain_dBi: 3, frequency_GHz: 2.2, rssi_sigma_dB: 0.5}
+# True magnetic field = IGRF + a common disturbance, so the field is noisier than the model a
+# vehicle carries. Not in the spec; default, spec silent: 300 nT rms (about 1 % of the field),
+# 24 smooth waves of 2000-8000 km wavelength drifting over 1-6 h, the same for every vehicle.
+field_disturbance: {rms_nT: 300, modes: 24, wavelength_min_km: 2000, wavelength_max_km: 8000, period_min_h: 1, period_max_h: 6}
 saa: {boundary_nT: 22000, field_model: IGRF-14}
 edge_computer_reboot_s: 60
 cdh_upsets: {lambda_out_per_s: 1.1574074074074073e-05, lambda_in_per_s: 5.555555555555556e-04, reset_fraction: 0.05}  # 1/86400, 1/1800
@@ -8,8 +15,11 @@ signals:
   gnss: {rate_s: 60, pos_sigma_m: 1.5, vel_sigma_m_s: 0.05}
   # nav: onboard EKF on the GNSS fixes, one solution per fix; accel_sigma_m_s2 is its process noise,
   # step_s its propagation step,
-  # drag_scale_* the prior spread and random walk of its density multiplier. Default, spec silent.
-  nav: {rate_s: 60, accel_sigma_m_s2: 1.0e-5, step_s: 10, drag_scale_sigma: 1.0, drag_scale_walk_per_sqrt_s: 1.0e-3}
+  # linearize_every_fixes how often it refreshes its transition matrix, drag_scale_* the prior
+  # spread and random walk of its density multiplier. Default, spec silent.
+  nav: {rate_s: 60, accel_sigma_m_s2: 1.0e-5, step_s: 30, linearize_every_fixes: 5, drag_scale_sigma: 1.0, drag_scale_walk_per_sqrt_s: 1.0e-3}
+  # magnetometer: three-axis, sampled with the navigation solution. Default, spec silent.
+  magnetometer: {rate_s: 60, sigma_nT: 30}
   star_tracker: {rate_s: 30}
   imu: {rate_s: 30, sigma_rad_s: 5.0e-5}
   pack_voltage: {rate_s: 30, sigma_V: 0.04}
@@ -23,3 +33,5 @@ signals:
 sensor_faults:
   imu: {bias_rad_s: 0.0, scale: 1.0, noise_mult: 1.0, stuck: 0.0}
   gnss: {offset_m: 0.0, noise_mult: 1.0}
+  mag: {bias_nT: 0.0, noise_mult: 1.0, coupling_nT_per_A: 0.0}
+  radio: {tx_loss_dB: 0.0}
