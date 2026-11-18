@@ -65,6 +65,9 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--lead", type=float, default=None, help="forced fault lead [s]")
     r.add_argument("--workers", type=int, default=1)
     r.add_argument("--force", action="store_true", help="rerun completed seeds")
+    r.add_argument("--truth-cache", type=Path, default=None,
+                   help="directory that keeps each seed's fault-free truth; runs with no fault "
+                        "or a sensor-only fault read it instead of recomputing")
     r.add_argument("--duration-h", type=float, default=None,
                    help="override the drawn run length (tests, CI)")
     r.add_argument("--params", type=Path, default=DEFAULT_PARAMS)
@@ -136,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "run":
         cfg = fault_config(args.fault, args.lead, args.fault_set, args.profile)
         batch = run_batch(args.params, parse_seeds(args.seeds), args.out, cfg, args.duration_h,
-                          args.workers, args.force)
+                          args.workers, args.force, args.truth_cache)
         c = batch["counts"]
         print(f"ok {c['ok']}, skipped {c['skipped']}, failed {c['failed']} "
               f"in {batch['wall_s']:.1f} s -> {args.out}")

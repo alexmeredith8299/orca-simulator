@@ -170,31 +170,75 @@ def _unit(x: F64) -> F64:
 
 # Parameter paths that the orbit integration does not read, so a fault on them leaves the
 # fault-free trajectory valid. Any other path (thruster, mass, drag) re-integrates.
+_SENSOR_ONLY = ("sensor_faults.",)
 _ORBIT_FREE = ("sensor_faults.", "eps.", "wheels.", "crosslink.", "cdh_upsets.",
                "imager_dark_current.", "thermal.")
 
 
-def run_mission(
-    params: Params,
-    seed: int,
-    duration_s: float | None = None,
-    draws: SeedDraws | None = None,
-    overrides: dict[str, dict[str, float]] | None = None,
-    fault: FaultConfig | None = None,
-) -> MissionRun:
-    """Propagate all six vehicles end to end with the mission thread.
+@dataclass
+class Truth:
+    """Everything a run computes before the sensors: orbits, attitude, wheels, gates, power and
+    thermal. A fault that only changes what sensors report leaves it valid, so it can be computed
+    once for a seed and reused. `traj0` is the first, fault-free orbit pass, which sets the
+    onset of a fault."""
 
-    `overrides` maps a vehicle to fixed ParamView overrides (dotted path -> value). `fault`
-    selects the seeded fault draw (default), no fault, or a forced fault (and lead); the
-    injector schedules the faulted parameter(s) on that vehicle's ParamView, and every model
-    reads them at the current time.
-    """
-    start_wall = time.perf_counter()
-    draws = draws or draw_seed(params, seed)
-    sats = list(params.sat_ids)
-    views = {s: ParamView(params, s) for s in sats}
+    draws: SeedDraws
+    sats: list[str]
+    station_names: list[str]
+    t: F64
+    rot: F64
+    pole: F64
+    sun_u: F64
+    sun_d: F64
+    sun_ecef: F64
+    clock: Clock
+    traj0: _Trajectory
+    traj: _Trajectory
+    q: F64
+    h_wheel: F64
+    omega: F64
+    gate_take: B
+    gate_slew: B
+    gate_pass: B
+    slews: dict[str, list[SlewResult]]
+    takes: dict[str, TakeRecord]
+    elev: F64
+    shadow: F64
+    saa: dict[str, SaaHistory]
+    eps: dict[str, EpsHistory]
+    thermal: dict[str, ThermalHistory]
+    therm_noise: dict[str, F64]
+    overrides: dict[str, dict[str, float]]
+    injector: Injector | None = None
+
+
+def reuses_baseline(params: Params, seed: int, fault: FaultConfig) -> bool:
+    """True when this seed's run can use the fault-free `Truth` of the same seed: no fault, or a
+    fault on sensors only."""
+    picked = _pick_fault(params, fault, draw_seed(params, seed))
+    return picked is None or _sensor_only(params, picked[0])
+
+
+def _make_views(
+    params: Params, overrides: dict[str, dict[str, float]] | None
+) -> dict[str, ParamView]:
+    views = {s: ParamView(params, s) for s in params.sat_ids}
     for sat, ov in (overrides or {}).items():
         views[sat].overrides.update(ov)
+    return views
+
+
+def compute_truth(
+    params: Params,
+    draws: SeedDraws,
+    duration_s: float | None,
+    overrides: dict[str, dict[str, float]] | None,
+    picked: tuple[str, float, str | None] | None,
+) -> Truth:
+    """The truth stage of a run. `picked` is a fault (id, lead, shape) that changes physical
+    quantities, installed after the fault-free first pass, or None for a fault-free run."""
+    sats = list(params.sat_ids)
+    views = _make_views(params, overrides)
     v0 = views[sats[0]]
     clock = Clock.from_view(v0, draws.run_length_s if duration_s is None else duration_s)
     t = clock.tick_times_s()
@@ -216,8 +260,8 @@ def run_mission(
     # orbit.
     traj = _integrate(params, views, sats, draws, clock, model, y0, rot, sun_u, sites, mask,
                       suspend)
-    injector = _fault_setup(params, fault or FaultConfig(), draws, views, t, clock, traj, rot,
-                            sun_u, sun_ecef)
+    traj0 = traj
+    injector = _arm_fault(params, picked, draws, views, t, clock, traj, rot, sun_u, sun_ecef)
     if injector is not None:
         injector.install(views[injector.fault.vehicle])
         if not all(p.startswith(_ORBIT_FREE) for p in injector.fault.paths):
@@ -334,6 +378,55 @@ def run_mission(
         n = int(np.flatnonzero(np.isclose(t, rec.t_take_s))[0])
         rec.payload_K = float(thermal[sat].node(PAYLOAD_NODE)[n])
         rec.dark_current_e_s_px = dark_current_e_s_px(views[sat].at(rec.t_take_s), rec.payload_K)
+    return Truth(
+        draws=draws, sats=sats, station_names=[s.name for s in sites], t=t, rot=rot, pole=pole,
+        sun_u=sun_u, sun_d=sun_d, sun_ecef=sun_ecef, clock=clock, traj0=traj0, traj=traj, q=q,
+        h_wheel=h_wheel, omega=omega, gate_take=gate_take, gate_slew=gate_slew,
+        gate_pass=gate_pass, slews=slews, takes=takes, elev=elev, shadow=shadow, saa=saa,
+        eps=eps, thermal=thermal, therm_noise=therm_noise, overrides=dict(overrides or {}),
+        injector=injector,
+    )
+
+
+def run_mission(
+    params: Params,
+    seed: int,
+    duration_s: float | None = None,
+    draws: SeedDraws | None = None,
+    overrides: dict[str, dict[str, float]] | None = None,
+    fault: FaultConfig | None = None,
+    baseline: Truth | None = None,
+) -> MissionRun:
+    """Propagate all six vehicles end to end with the mission thread.
+
+    `overrides` maps a vehicle to fixed ParamView overrides (dotted path -> value). `fault`
+    selects the seeded fault draw (default), no fault, or a forced fault (and lead); the
+    injector schedules the faulted parameter(s) on that vehicle's ParamView, and every model
+    reads them at the current time. A fault on sensors only (`sensor_faults.*`) leaves the truth
+    stage unchanged, so `baseline`, the fault-free `Truth` of this seed (see `compute_truth`),
+    is reused when given; the truth is then not recomputed.
+    """
+    start_wall = time.perf_counter()
+    draws = draws or draw_seed(params, seed)
+    picked = _pick_fault(params, fault or FaultConfig(), draws)
+    if picked is None or _sensor_only(params, picked[0]):
+        truth = baseline or compute_truth(params, draws, duration_s, overrides, None)
+        views = _make_views(params, truth.overrides)
+        injector = _arm_fault(params, picked, draws, views, truth.t, truth.clock, truth.traj0,
+                              truth.rot, truth.sun_u, truth.sun_ecef)
+        if injector is not None:
+            injector.install(views[injector.fault.vehicle])
+    else:
+        truth = compute_truth(params, draws, duration_s, overrides, picked)
+        injector = truth.injector
+        views = _make_views(params, truth.overrides)
+        if injector is not None:
+            injector.install(views[injector.fault.vehicle])
+    sats, t, traj = truth.sats, truth.t, truth.traj
+    rot, sun_u, pole = truth.rot, truth.sun_u, truth.pole
+    q, omega, eps, thermal, saa = truth.q, truth.omega, truth.eps, truth.thermal, truth.saa
+    gate_pass, gate_take, gate_slew = truth.gate_pass, truth.gate_take, truth.gate_slew
+    therm_noise = truth.therm_noise
     field = FieldDisturbance.draw(views[sats[0]], draws.seed)
     signals = {
         sat: _vehicle_signals(
@@ -347,13 +440,13 @@ def run_mission(
     return MissionRun(
         draws=draws,
         sats=sats,
-        station_names=[s.name for s in sites],
+        station_names=truth.station_names,
         t_s=t,
         r_km=traj.r,
         v_km_s=traj.v,
         q=q,
         omega=omega,
-        h_wheel=h_wheel,
+        h_wheel=truth.h_wheel,
         mass_kg=traj.mass,
         propellant_kg=traj.prop,
         a_cmd_m_s2=traj.a_cmd,
@@ -364,12 +457,12 @@ def run_mission(
         gate_burn=traj.burning,
         eci_to_ecef=rot,
         sun_unit=sun_u,
-        sun_dist_km=sun_d,
-        shadow=shadow,
-        elevation_deg=elev,
+        sun_dist_km=truth.sun_d,
+        shadow=truth.shadow,
+        elevation_deg=truth.elev,
         burns=traj.burns,
-        takes=takes,
-        slews=slews,
+        takes=truth.takes,
+        slews=truth.slews,
         wall_s=time.perf_counter() - start_wall,
         eps=eps,
         thermal=thermal,
@@ -716,22 +809,11 @@ def _vehicle_signals(
     )
 
 
-def _fault_setup(
-    params: Params,
-    cfg: FaultConfig,
-    draws: SeedDraws,
-    views: dict[str, ParamView],
-    t: F64,
-    clock: Clock,
-    traj: _Trajectory,
-    rot: F64,
-    sun_u: F64,
-    sun_ecef: F64,
-) -> Injector | None:
-    """Spec: Faults. Pick the fault (seeded draw, or forced), and arm it by the fault lead
-    before the faulted vehicle's take start in the fault-free plan `traj` of the same seed, so a
-    fault cannot move its own onset. Returns None for no fault or when that vehicle has no take
-    in the run."""
+def _pick_fault(
+    params: Params, cfg: FaultConfig, draws: SeedDraws
+) -> tuple[str, float, str | None] | None:
+    """Spec: Faults. The fault id, lead and start shape for this seed (seeded draw, or forced);
+    None for no fault."""
     if cfg.mode == "none":
         return None
     profile = None
@@ -745,6 +827,33 @@ def _fault_setup(
         fid = cfg.fault_id
         lead = lead if cfg.lead_s is None else cfg.lead_s
         profile = cfg.profile
+    return fid, lead, profile
+
+
+def _sensor_only(params: Params, fid: str) -> bool:
+    """True when the fault changes only what sensors or the radio report, so every truth quantity
+    of the fault-free run stays valid."""
+    return all(p.startswith(_SENSOR_ONLY) for p in params.fault(fid).paths)
+
+
+def _arm_fault(
+    params: Params,
+    picked: tuple[str, float, str | None] | None,
+    draws: SeedDraws,
+    views: dict[str, ParamView],
+    t: F64,
+    clock: Clock,
+    traj: _Trajectory,
+    rot: F64,
+    sun_u: F64,
+    sun_ecef: F64,
+) -> Injector | None:
+    """Spec: Faults. Arm the picked fault by its lead before the faulted vehicle's take start in
+    the fault-free plan `traj` of the same seed, so a fault cannot move its own onset. Returns
+    None for no fault or when that vehicle has no take in the run."""
+    if picked is None:
+        return None
+    fid, lead, profile = picked
     sat = params.fault(fid).vehicle
     plan = _plan_take(views[sat], list(views).index(sat), t, clock.tick_s, clock.step_s, traj,
                       rot, sun_u, sun_ecef)

@@ -44,6 +44,11 @@ expand3 posterior /path/outside/repo --detector <names>             # fault prob
 - Use `--fault-set extended` with `run` to include the extended faults.
 - Force one fault with `--fault <id>`. For an extended fault, choose its start shape with
   `--profile` (`step`, `ramp`, `exponential` or `intermittent`, whichever the fault allows).
+- Add `--truth-cache DIR` to reuse each seed's fault-free truth. Runs with no fault or with a
+  sensor-only fault (the gyro, GNSS, magnetometer and `tx_fade` faults) read it, so only the
+  sensors are simulated again. A stored truth is about 45 MB per seed for 72 h. Its name carries a
+  hash of `params/` and the simulator code, so an edit makes the next run store a new one; delete
+  old files yourself.
 - Use `--duration-h` to shorten a run. This is useful for tests.
 - Write batches outside the repository. A batch of 100 seeds is large.
 - Tune detectors on seeds 0 to 69. Test them on seeds 70 to 99, or on a fresh batch.
