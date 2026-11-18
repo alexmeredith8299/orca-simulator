@@ -25,7 +25,8 @@ tx_fade: {name: crosslink transmit fade, vehicle: SAT-2, param: sensor_faults.ra
 # Magnetometer (Phase C). Sensor noise is 30 nT per axis (1 sigma); the true field also carries a
 # common disturbance of 300 nT rms that the vehicle's IGRF model lacks. Bias 300 nT on every axis
 # (10 sigma), noise x5, and a coupling of 100 nT per A of pack current on every axis. The vehicles
-# sit in the four-vehicle cluster, so each has three partners.
+# sit in the four-vehicle cluster, so each has three partners. All three are on take vehicles
+# (SAT-2, SAT-3, SAT-4), as the spec requires of a fault's onset, which is set by that vehicle's take.
 mag_bias:     {name: magnetometer bias, vehicle: SAT-3, param: sensor_faults.mag.bias_nT, set_to: 300.0, profile: step, shapes: [step, ramp], t_r_s: 21600}
 mag_noise:    {name: magnetometer noise, vehicle: SAT-4, param: sensor_faults.mag.noise_mult, m: 5, profile: ramp, shapes: [ramp, intermittent], t_r_s: 21600, t_on_s: 1800, t_off_s: 3600}
-mag_coupling: {name: magnetometer current coupling, vehicle: SAT-1, param: sensor_faults.mag.coupling_nT_per_A, set_to: 100.0, profile: step, shapes: [step, ramp], t_r_s: 21600}
+mag_coupling: {name: magnetometer current coupling, vehicle: SAT-2, param: sensor_faults.mag.coupling_nT_per_A, set_to: 100.0, profile: step, shapes: [step, ramp], t_r_s: 21600}

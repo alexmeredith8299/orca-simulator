@@ -45,7 +45,8 @@ def test_registry_names() -> None:
     faults = ("mcd_f2", "mcdn_f8", "mcdn_f9", "mcdn_f10", "mcdn_wheels", "mcdn_burn", "mcdn_gnss",
               "mcdn_gnssraw", "mcdn_mag")
     assert set(MCDN) == {f"{f}{s}" for f in faults for s in ("", "_sig", "_sig_comms")} | {
-        "mcdn_txfade_sig", "mcdn_txfade_sig_comms", "mcdn_gnssrel", "mcdn_gnssrel_comms"}
+        "mcdn_txfade_sig", "mcdn_txfade_sig_comms", "mcdn_gnssrel", "mcdn_gnssrel_comms",
+        "mcdn_gnsspeer", "mcdn_gnsspeer_comms"}
     assert not set(detector_names("all")) & set(MCDN)
 
 
@@ -187,6 +188,29 @@ def test_gnssrel_sample_is_the_relative_fix_less_the_one_an_orbit_earlier(tmp_pa
     assert det.x(d, "SAT-1", s).shape[1] == 10  # type: ignore[attr-defined]
 
 
+def test_gnsspeer_inputs_are_lean_and_only_the_top_vehicle_keeps_a_score(tmp_path: Path) -> None:
+    seed = make_batch(tmp_path, ["none"], kepler=True)[0]
+    d = SeedData(tmp_path / f"seed_{seed:05d}")
+    det = MCDN["mcdn_gnsspeer"](CFG, str(PARAMS_DIR))
+    s = det.samples(d, "SAT-1")  # type: ignore[attr-defined]
+    full = MCDN["mcdn_gnssraw_sig"](CFG, str(PARAMS_DIR))
+    own = det.x(d, "SAT-1", s)  # type: ignore[attr-defined]
+    assert own.shape[1] < full.x(d, "SAT-1", s).shape[1]  # type: ignore[attr-defined]
+    per = {}
+    for sat in d.sat_ids:
+        smp = det.samples(d, sat)  # type: ignore[attr-defined]
+        per[sat] = (smp, np.zeros_like(smp.y), np.ones_like(smp.y))
+    traces = det.score(d, per)  # type: ignore[attr-defined]
+    for fault in ("gnss_jump", "gnss_noise"):
+        grid = {}
+        for t in traces:
+            if t.fault_id == fault:
+                grid[t.sat_id] = dict(zip(t.t_s, t.score, strict=True))
+        for t_s in grid["SAT-1"]:
+            live = [sat for sat in grid if grid[sat].get(t_s, 0.0) > 0.0]
+            assert len(live) <= 1
+
+
 @pytest.mark.slow
 @pytest.mark.parametrize(("name", "kind", "fid"), [
     ("mcdn_gnss", "gnss_noise", "gnss_noise"), ("mcdn_gnss_sig", "gnss_noise", "gnss_noise"),
@@ -196,7 +220,9 @@ def test_gnssrel_sample_is_the_relative_fix_less_the_one_an_orbit_earlier(tmp_pa
     # the raw-fix detector does not see a held offset (it cancels between two fixes), so no jump
     ("mcdn_gnssraw", "gnss_noise", "gnss_noise"), ("mcdn_gnssraw_sig", "gnss_noise", "gnss_noise"),
     ("mcdn_gnssrel", "gnss_noise", "gnss_noise"), ("mcdn_gnssrel", "gnss_jump", "gnss_jump"),
-    ("mcdn_gnssrel_comms", "gnss_jump", "gnss_jump")])
+    ("mcdn_gnssrel_comms", "gnss_jump", "gnss_jump"),
+    ("mcdn_gnsspeer", "gnss_noise", "gnss_noise"),
+    ("mcdn_gnsspeer_comms", "gnss_noise", "gnss_noise")])
 def test_the_gnss_faulted_vehicles_score_stands_out(tmp_path: Path, name: str, kind: str,
                                                     fid: str) -> None:
     seeds = make_batch(tmp_path, [*(["none"] * 6), kind], kepler=True)

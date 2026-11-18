@@ -43,11 +43,11 @@ import numpy as np
 from numpy.typing import NDArray
 
 from expand3.detect.base import Detector, Trace
-from expand3.detect.comms import hold
+from expand3.detect.comms import hold, relay_source
 from expand3.detect.data import SeedData
 from expand3.detect.features import context, sunlit
 from expand3.detect.glr import binomial_glr, gaussian_glr, poisson_glr, slope_glr, variance_glr
-from expand3.detect.mcdmulti import ALL, _MultiView, measured_block
+from expand3.detect.mcdmulti import ALL, _MultiView, measured_block, slot_order
 from expand3.detect.mcdrop import McdModel, McdThermal
 from expand3.params import load_params
 
@@ -518,6 +518,68 @@ class McdGnssRaw(_Nn):
         return out
 
 
+class McdGnssPeer(McdGnssRaw):
+    """`McdGnssRaw` with a lean multi-satellite input and one alarming vehicle per tick. The
+    inputs are the vehicle's own context and raw-fix inputs, and for each other vehicle only its
+    raw fix, its latest residual and how old they are: not the 29 sun, gate and heater features
+    of every slot, which say nothing about a receiver. A fault is on one vehicle, but its fix is
+    an input to every other vehicle's network, so a healthy vehicle's prediction moves too. Only
+    the vehicle with the largest score at a tick keeps it, as F8 does for a link's two ends.
+    Both forms are multi-satellite: `_sig` (at once) and `_sig_comms` (through the links).
+    """
+
+    name = "mcdn_gnsspeer"
+    block_key = "gnssraw"  # the same peer block as McdGnssRaw, so the cache is shared
+    comms = False
+
+    def x(self, d: SeedData, sat: str, s: Samples) -> F32:
+        seed = self._seed(d)
+        sc = self._scenario()
+        t = seed["t"]
+        dt = float(np.median(np.diff(t)))
+        ticks = np.arange(len(t), dtype=np.int64)
+        cluster_of = {v: k for k, c in enumerate(sc.clusters) for v in c}
+        parts = [context(d, sat, self.cfg)[1][s.tick], s.local]
+        for peer in slot_order(sat, sc.clusters)[1:]:
+            if peer not in seed["feats"]:
+                continue
+            if not self.comms:
+                idx, age = ticks, np.zeros(len(t))
+            elif cluster_of[peer] == cluster_of[sat]:
+                idx, age = hold(seed["delivered"][(peer, sat)], dt)
+            else:
+                idx = relay_source(seed["pass"][cluster_of[peer]], seed["pass"][cluster_of[sat]])
+                age = np.where(idx >= 0, (ticks - idx) * dt, np.inf)
+            block = seed["meas"][self.block_key][peer]
+            held = np.where((idx >= 0)[:, None], block[np.maximum(idx, 0)], np.nan)
+            cap = self.cfg.mcdm_age_cap_s
+            parts += [held[s.tick], (np.minimum(age, cap) / cap)[s.tick, None]]
+        return np.concatenate(parts, axis=1).astype(np.float32)
+
+    def score(self, d: SeedData, per: dict[str, tuple[Samples, F64, F64]]) -> list[Trace]:
+        n = len(self._seed(d)["t"])
+        traces = {t.sat_id + t.fault_id: t for t in super().score(d, per)}
+        out = []
+        for fault in self.fault_ids:
+            held = {}
+            for sat, (s, _, _) in per.items():
+                score = traces[sat + fault].score
+                full = np.zeros(n)
+                full[s.tick] = score
+                idx, _ = hold(np.isin(np.arange(n), s.tick), 1.0)
+                held[sat] = np.where(idx >= 0, full[np.maximum(idx, 0)], 0.0)
+            best = np.max(np.stack(list(held.values())), axis=0)
+            for sat, (s, _, _) in per.items():
+                score = traces[sat + fault].score
+                out.append(Trace(sat, fault, s.t, np.where(score >= best[s.tick], score, 0.0)))
+        return out
+
+
+class McdGnssPeerComms(McdGnssPeer):
+    name = "mcdn_gnsspeer_comms"
+    comms = True
+
+
 class McdGnssRel(_Nn):
     """Relative raw fixes only: the vehicle's fix minus its cluster mates' fixes, from the same
     tick, with nothing absolute as an input. A held offset on one receiver moves every relative
@@ -838,5 +900,6 @@ MCDN: dict[str, type[Detector]] = {
 MCDN |= _variants(McdGnss)
 MCDN |= _variants(McdGnssRaw)
 MCDN |= {c.name: c for c in (McdGnssRel, McdGnssRelComms)}
+MCDN |= {c.name: c for c in (McdGnssPeer, McdGnssPeerComms)}
 MCDN |= _variants(McdMag)
 MCDN |= {c.name: c for c in (McdTxFade, McdTxFadeComms)}
