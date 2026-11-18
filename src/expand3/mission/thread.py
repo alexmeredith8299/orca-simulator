@@ -67,7 +67,7 @@ from expand3.vehicle.cdh import SaaHistory, saa_history
 from expand3.vehicle.eps import BATTERY_NODE, PAYLOAD_NODE, Eps, EpsHistory, EpsInputs, history
 from expand3.vehicle.magref import onboard_field
 from expand3.vehicle.nav import nav_model, navigate
-from expand3.vehicle.orbit import Forces, OrbitModel, initial_states, rk4_step
+from expand3.vehicle.orbit import Forces, OrbitModel, initial_states
 from expand3.vehicle.payload import dark_current_e_s_px
 from expand3.vehicle.thermal import (
     Thermal,
@@ -452,10 +452,7 @@ def _integrate(
                 dv[k] += st.dv_m_s
                 mass[k] -= st.dm_kg
                 prop[k] -= st.dm_kg
-            def f(yy: F64, a: F64 = a_thr, m: F64 = m_start) -> F64:
-                return model.deriv(yy, a, m)
-
-            y = rk4_step(f, y, dt)
+            y = model.rk4(y, dt, a_thr, m_start)
     return out
 
 

@@ -130,6 +130,7 @@ class Thermal:
 
     def __init__(self, view: ParamView) -> None:
         self.view = view
+        self._cache: tuple[tuple[tuple[str, float], ...], Network] | None = None
         th = view.params.bus(view.sat_id).thermal
         self.names = list(th.nodes)
         n = len(self.names)
@@ -196,6 +197,20 @@ class Thermal:
 
     def network(self) -> Network:
         """The network with alpha and epsilon read through ParamView now (F7)."""
+        view = self.view
+        if not any(p.startswith("thermal.") for p in view.schedule):
+            # Nothing varies in time, so the network depends only on the thermal overrides.
+            key = tuple(sorted(
+                (p, v) for p, v in view.overrides.items() if p.startswith("thermal.")
+            ))
+            if self._cache is not None and self._cache[0] == key:
+                return self._cache[1]
+            net = self._read_network()
+            self._cache = (key, net)
+            return net
+        return self._read_network()
+
+    def _read_network(self) -> Network:
         n = len(self.names)
         alpha, eps = np.zeros(n), np.zeros(n)
         for i in self.surface:
