@@ -168,6 +168,12 @@ def _unit(x: F64) -> F64:
     return out
 
 
+# Parameter paths that the orbit integration does not read, so a fault on them leaves the
+# fault-free trajectory valid. Any other path (thruster, mass, drag) re-integrates.
+_ORBIT_FREE = ("sensor_faults.", "eps.", "wheels.", "crosslink.", "cdh_upsets.",
+               "imager_dark_current.", "thermal.")
+
+
 def run_mission(
     params: Params,
     seed: int,
@@ -203,15 +209,20 @@ def run_mission(
     model = OrbitModel.from_params(params, sats, draws, pole, Forces())
     y0 = initial_states(params, sats, draws.epoch_utc)
 
-    injector = _fault_setup(params, fault or FaultConfig(), draws, clock, rot, sun_u, sun_ecef,
-                            sites, mask, pole, overrides or {})
-    if injector is not None:
-        injector.install(views[injector.fault.vehicle])
-
     suspend: dict[str, list[tuple[float, float]]] = {}
     plans: dict[str, _TakePlan] = {}
+    # The first pass is fault-free (the injector is not installed yet), so it is also the plan
+    # that sets the onset of the fault. It is reused for the run unless the fault changes the
+    # orbit.
     traj = _integrate(params, views, sats, draws, clock, model, y0, rot, sun_u, sites, mask,
                       suspend)
+    injector = _fault_setup(params, fault or FaultConfig(), draws, views, t, clock, traj, rot,
+                            sun_u, sun_ecef)
+    if injector is not None:
+        injector.install(views[injector.fault.vehicle])
+        if not all(p.startswith(_ORBIT_FREE) for p in injector.fault.paths):
+            traj = _integrate(params, views, sats, draws, clock, model, y0, rot, sun_u, sites,
+                              mask, suspend)
     for _ in range(_MAX_REPLANS):
         plans = {
             sat: p
@@ -712,19 +723,18 @@ def _fault_setup(
     params: Params,
     cfg: FaultConfig,
     draws: SeedDraws,
+    views: dict[str, ParamView],
+    t: F64,
     clock: Clock,
+    traj: _Trajectory,
     rot: F64,
     sun_u: F64,
     sun_ecef: F64,
-    sites: list[Station],
-    mask: float,
-    pole: F64,
-    overrides: dict[str, dict[str, float]],
 ) -> Injector | None:
     """Spec: Faults. Pick the fault (seeded draw, or forced), and arm it by the fault lead
-    before the faulted vehicle's take start in the fault-free plan of the same seed, so a fault
-    cannot move its own onset. Returns None for no fault or when that vehicle has no take in the
-    run."""
+    before the faulted vehicle's take start in the fault-free plan `traj` of the same seed, so a
+    fault cannot move its own onset. Returns None for no fault or when that vehicle has no take
+    in the run."""
     if cfg.mode == "none":
         return None
     profile = None
@@ -739,14 +749,8 @@ def _fault_setup(
         lead = lead if cfg.lead_s is None else cfg.lead_s
         profile = cfg.profile
     sat = params.fault(fid).vehicle
-    view = ParamView(params, sat)
-    view.overrides.update(overrides.get(sat, {}))
-    model = OrbitModel.from_params(params, [sat], draws, pole, Forces())
-    y0 = initial_states(params, [sat], draws.epoch_utc)
-    traj = _integrate(params, {sat: view}, [sat], draws, clock, model, y0, rot, sun_u, sites,
-                      mask, {})
-    t = clock.tick_times_s()
-    plan = _plan_take(view, 0, t, clock.tick_s, clock.step_s, traj, rot, sun_u, sun_ecef)
+    plan = _plan_take(views[sat], list(views).index(sat), t, clock.tick_s, clock.step_s, traj,
+                      rot, sun_u, sun_ecef)
     if plan is None:
         return None
     return Injector(params, fid, plan.t_take - lead, lead, clock.tick_s, profile, draws.seed)
