@@ -18,6 +18,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from expand3.params import ParamView
+from expand3.vec3 import cross3
 from expand3.vehicle.attitude import dcm_to_quat
 
 F64 = NDArray[np.float64]
@@ -37,12 +38,12 @@ def axis_from_label(label: str) -> F64:
 
 def _frame(p: F64, s: F64) -> F64:
     t1 = p / np.linalg.norm(p)
-    t2 = np.cross(t1, s)
+    t2 = cross3(t1, s)
     n2 = np.linalg.norm(t2)
     if n2 < 1e-12:
         raise ValueError("TRIAD directions are parallel; roll is undefined")
     t2 = t2 / n2
-    return np.column_stack([t1, t2, np.cross(t1, t2)])
+    return np.column_stack([t1, t2, cross3(t1, t2)])
 
 
 def triad(b1: F64, i1: F64, b2: F64, i2: F64) -> F64:

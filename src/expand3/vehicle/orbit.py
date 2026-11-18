@@ -24,6 +24,7 @@ from expand3.env.frames import eci_to_ecef, mean_sun_lon_ecef_rad
 from expand3.params import Params, ParamView
 from expand3.timebase import SeedDraws
 from expand3.units import DEG_PER_HOUR_ANGLE, HOURS_PER_DAY, M_PER_KM
+from expand3.vec3 import cross3
 
 F64 = NDArray[np.float64]
 
@@ -105,7 +106,7 @@ class OrbitModel:
             k = -1.5 * self.J2 * self.mu_km3_s2 * self.R_E_km**2 / rn**5
             acc = acc + k * ((1.0 - 5.0 * z**2 / rn**2) * r + 2.0 * z * self.pole)
         if self.forces.drag:
-            v_rel = v - self.omega_E_rad_s * np.cross(self.pole, r)
+            v_rel = v - self.omega_E_rad_s * cross3(self.pole, r)
             speed = np.sqrt(np.einsum("ki,ki->k", v_rel, v_rel))[:, None]
             rho = density_kg_m3(rn - self.R_E_km, self.rho0_kg_m3, self.h0_km, self.H_km)
             # rho [kg/m^3] * B [m^2/kg] is 1/m; x M_PER_KM gives 1/km, so a is in km/s^2.

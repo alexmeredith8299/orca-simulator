@@ -18,6 +18,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from expand3.params import ParamView
+from expand3.vec3 import cross3
 from expand3.vehicle.wheels import WheelArray
 
 F64 = NDArray[np.float64]
@@ -32,7 +33,7 @@ def quat_mul(p: F64, q: F64) -> F64:
     """Hamilton product p (x) q."""
     pw, pv = p[0], p[1:]
     qw, qv = q[0], q[1:]
-    return np.concatenate([[pw * qw - pv @ qv], pw * qv + qw * pv + np.cross(pv, qv)])
+    return np.concatenate([[pw * qw - pv @ qv], pw * qv + qw * pv + cross3(pv, qv)])
 
 
 def quat_conj(q: F64) -> F64:
@@ -106,7 +107,7 @@ def gravity_gradient_torque(inertia_b: F64, r_eci: F64, q: F64, mu_km3_s2: float
     unit."""
     rn = np.linalg.norm(r_eci)
     n_b = quat_to_dcm(q).T @ (-r_eci / rn)
-    out: F64 = 3 * mu_km3_s2 / rn**3 * np.cross(n_b, inertia_b @ n_b)
+    out: F64 = 3 * mu_km3_s2 / rn**3 * cross3(n_b, inertia_b @ n_b)
     return out
 
 
