@@ -1,131 +1,156 @@
-# Plan: 36 additional faults, their simulation and their identification
+# Plan: extended faults, their simulation and their identification
 
-Source: `Gantt—EXPAND - Fault Signatures & FDI Methods & Metrics.csv` (downloaded; not in the
-repo). It is not the spec. Everything below that the spec does not state is an extension, with
-spec-silent defaults marked as in the earlier milestones. Nothing here is built yet.
+Source: `Gantt—EXPAND - Fault Signatures & FDI Methods & Metrics.csv` (not in the repo). The CSV is
+not the spec. Everything below that the spec does not state is an extension, and each value that
+we choose is a default marked "spec silent". Last updated 2026-11-18.
 
-## What the CSV adds
+## Status
 
-It lists 46 fault types across ADCS, navigation, propulsion, power, thermal and C&DH, comms and
-payload. Ten are the spec's F1 to F10:
+The CSV lists 46 fault types. Ten are the spec's F1 to F10, so 36 are new.
 
-| Spec | CSV name |
+| State | Faults |
 |---|---|
-| F1 | `resistance_growth` |
-| F2 | `string_open` |
-| F3 | `wheel_friction` |
-| F4 | `wheel_kt` |
-| F5 | `isp_loss` |
-| F6 | `authority` |
-| F7 | `insulation_degradation` |
-| F8 | `link_dropout` |
-| F9 | `upset_rate` |
-| F10 | `dark_current` |
+| Simulated, detected and documented (6) | `gnss_jump`, `gnss_noise`, `tx_fade`, `mag_bias`, `mag_noise`, `mag_coupling` |
+| Simulated only (4) | `gyro_bias`, `gyro_scale`, `gyro_noise`, `gyro_stuck` |
+| Not built (26) | See the tables under "Remaining work" |
 
-The other **36** are new. The CSV also uses shapes the injector lacks (exponential,
-intermittent, spike, recovering; it has step and ramp), and a metric list: MTTD, MTTI, detection,
-persist, identification and confirm latency, range-based F1, point-adjusted F1, NAB score,
-isolation accuracy, classification accuracy, unknown rate, false alarm rate per nominal hour
-(split by eclipse and SAA), missed detection rate and onset error.
+The documentation of the six is in `docs/spec/EXPAND3_Extended_Faults_Supplement.md`.
 
-It also resolves the F5/F6 problem found in the detectors. `isp_loss` shows a normal tank
-pressure drop and `authority` a low one, so a tank pressure signal would separate them. The
-simulator only has the tank gauge (0.10 kg noise per sample against about 0.04 kg drained in a
-burn), which cannot.
+## Decisions taken
+
+- **Keep the existing implementations of `tx_fade` and the three magnetometer faults for now.** They
+  differ from the CSV in three ways. We may add the CSV versions later as separate faults.
+  - `tx_fade` is a loss of the crosslink transmit power, and it shows only in the signal strength
+    that partners read. The CSV describes the transmit power of the vehicle on ground passes,
+    measured by its own telemetry (`tx_power_dbm`, with a `ground_pass` flag). A vehicle can detect
+    that version alone, so it has a single-satellite detector.
+  - `mag_coupling` couples the magnetometer to the pack current, because the simulator has no
+    magnetorquers. The CSV couples it to the magnetorquer dipole (`mtq_dipole_am2`).
+  - The shapes differ. The CSV gives `mag_noise` as step or intermittent (we have ramp or
+    intermittent) and `mag_coupling` as step only (we have step or ramp).
+- **Detectors stay as they are.** The method is a dropout MLP with a GLR, in single-satellite and
+  multi-satellite forms. The CSV names Boosted Tree and Rules, and we do not follow that.
+- **One fault per seed**, as in the spec.
 
 ## Constraints on the work
 
-- **Existing seeds stay bit-identical.** The extended draw comes from its own named stream
-  (for example `draw.fault_ext`) behind an option such as `--fault-set extended`. The golden
-  regression runs and every earlier batch must not change.
-- **Rules from `CLAUDE.md` apply.** Numbers come from `params/` through `ParamView`, randomness
-  from named substreams, no detection logic in the simulator, exit tests before code, and a spec
-  citation (here, a CSV row) in each docstring.
-- **Isolation of vehicles** holds as for F1 to F10: other vehicles are identical to the
-  no-fault run except for crosslink messages from the faulted vehicle and drops on its links.
+- **Existing seeds stay bit-identical.** The extended draw comes from its own named streams
+  (`draw.fault_ext` and others), behind `--fault-set extended`. The golden regression runs and every
+  earlier batch must not change.
+- **The rules in `CLAUDE.md` apply.** Numbers come from `params/` through `ParamView`, and
+  randomness comes from named substreams. The simulator holds no detection logic, and the exit tests
+  come before the code. Each docstring cites the CSV row.
+- **Vehicles stay isolated.** Every other vehicle matches the run with no fault, except for the
+  crosslink messages of the faulted vehicle and the drops on its links.
+- **The CSV gives parameter names but no numbers** in its "Vendor expected values" column (for
+  example `kt_nm_per_a` and `r_harness_ohm`). We choose the values as defaults, marked "spec silent".
 
-## Phase A: existing signals, new injection points (18 faults)
+## Step 0: groundwork
 
-| Group | Faults | Signals already in the batch | Injection |
-|---|---|---|---|
-| IMU | `gyro_bias`, `gyro_scale`, `gyro_noise`, `gyro_stuck` | `imu_omega_*`, `st_q_*`, `st_available` | Scheduled bias, scale, sigma and freeze on the IMU sensor model. |
-| Star tracker | `st_dropout`, `st_false_star`, `st_stuck` | `st_available`, `st_q_*` | Availability loss, a fixed attitude offset, a frozen fix. |
-| GNSS | `gnss_outage`, `gnss_jump`, `gnss_noise` | `gnss_valid`, `gnss_r_*`, `gnss_v_*` | Lost fixes, a position offset, larger noise. |
-| Thermistors | `temp_sensor_bias`, `temp_sensor_freeze` | `T_*_K_meas` | Offset or frozen reading on one node. |
-| Thermal | `heater_stuck_on`, `heater_stuck_off`, `radiator_degradation` | heater commanded and delivered, `T_*` | Heater latch override; a radiator node's emissivity (which node is a spec-silent choice). |
-| Power | `panel_efficiency`, `capacity_fade`, `cell_short` | `string_p_*`, `pack_v`, `pack_i`, `soc_est` | String efficiency (exponential); pack capacity (ramp or step); OCV offset and capacity step. |
+1. **Vehicle for each fault.** A fault starts a lead time before the take of its vehicle, and only
+   SAT-2, SAT-3 and SAT-4 fly takes. Put every new fault on one of those three. Move
+   `gyro_bias` (SAT-1), `gyro_scale` (SAT-5) and `gyro_noise` (SAT-6) too. A fault that belongs to a
+   physical part, such as the tank and the thruster, fixes its own vehicle (SAT-4 for burns).
+2. **New shapes.** The injector has step, ramp, exponential and intermittent. Add **spike**
+   (`wheel_cage`) and **recovering** (`latchup`, and `dark_current` as the CSV lists it).
+3. **Run time.** The six-vehicle run of 72 h took about 114 s in the last full test run, against a
+   limit of 60 s. Profile it before adding signals.
+4. **Prior and labels.** The prior becomes 1 over (10 + the number of extended faults). The
+   posterior labels must start at the first observable effect, as the F3, F5 and F6 results showed.
+5. **Scoring.** Add the metrics from the CSV to `score.py`: range-based F1, point-adjusted F1, NAB
+   score, isolation accuracy, classification accuracy with a confusion matrix, unknown rate, false
+   alarms per nominal hour (split by eclipse and SAA), missed detection rate and onset error.
 
-Work: extend `faults.yaml` and the injector's onset profiles (exponential, intermittent as
-on/off episodes from a named stream, spike, recovering), then scheduled parameters in
-`sensors.py`, `vehicle/eps.py` and `vehicle/thermal.py`. No new physical models.
+## Step 1: finish the gyro faults
 
-## Phase B: new signals from small models (14 faults)
+Add detectors (a variance GLR for `gyro_noise`, a frozen-signal test for `gyro_stuck`, offset and
+slope GLRs for `gyro_bias` and `gyro_scale`). Run batches and document the faults in the supplement.
+This tests the whole process on faults that already run.
 
-| Group | Faults | New signal or model needed |
+## Step 2: faults with signals that already exist (12)
+
+No new physical model is needed. Each fault is a scheduled change on a parameter.
+
+| Fault | CSV shapes | Injection |
 |---|---|---|
-| Tank | `tank_leak`, `pressure_sensor_bias` | Tank pressure and temperature from a blowdown (PVT) model with the bookkept propellant. This also makes F5 and F6 separable. |
-| Thruster | (F5, F6 gain `cat_bed_temp_k`, valve state) | Catalyst-bed temperature, valve state. |
-| Wheels | `wheel_drag`, `wheel_cage`, `wheel_seize` | Wheel speed, current and temperature from a motor model (Kt, idle current, viscous and Coulomb friction); a seized wheel stalls. |
-| Feeders and PDU | `feeder_switch_open`, `feeder_sensor_bias`, `feeder_sensor_noise`, `latchup` | Per-load feeder voltage and current, bus voltage, a current limit and trip. |
-| C&DH | `sw_reset`, `cdh_hang` | OBC uptime. |
-| Clock | `clock_drift`, `clock_jump` | OBC time against the GNSS receiver time. |
-| Radio | `tx_fade` | Transmit power on passes. |
+| `st_dropout` | intermittent, step | Loss of fix availability |
+| `st_false_star` | none given | A fixed attitude offset on a fix that is marked valid |
+| `st_stuck` | none given | A frozen fix |
+| `gnss_outage` | step, intermittent | Lost fixes |
+| `temp_sensor_bias` | step, ramp | Offset on one node |
+| `temp_sensor_freeze` | step | Frozen reading on one node |
+| `heater_stuck_on`, `heater_stuck_off` | step | Heater latch override |
+| `radiator_degradation` | ramp | Emissivity of one radiator node (the node is our choice) |
+| `panel_efficiency` | exponential, ramp | String efficiency |
+| `capacity_fade` | ramp, step | Pack capacity |
+| `cell_short` | step | OCV offset and a capacity step |
 
-Work: new sensor blocks in `sensors.py` and models in the relevant `vehicle/` modules, each
-with params, a spec-silent default and an exit test that the no-fault output is unchanged
-(except for the added columns).
+Order: the sensor faults, then thermal, then power. The power faults are confusable with
+`resistance_growth` (F1), so plan the isolation tests there. The CSV pairs `st_false_star` and
+`st_stuck` with `st_dropout`, and the gyro faults with `st_false_star`.
 
-## Phase C: a new subsystem (4 faults)
+## Step 3: faults that need new signals (13)
 
-`mag_bias`, `mag_noise`, `mag_coupling`, `mtq_stuck` need a body-frame magnetometer (the IGRF
-model gives the field magnitude `field_nT` today, not the vector), magnetorquers and a
-desaturation law. That changes wheel momentum and therefore every wheel-related baseline, so it
-must be off by default and kept out of the golden runs. Do this last, and only if wanted.
+| Order | Faults | CSV shapes | New signals |
+|---|---|---|---|
+| 1 | `tank_leak`, `pressure_sensor_bias` | step, ramp | Tank pressure and temperature from a blowdown model. This also separates F5 from F6. |
+| 2 | `wheel_drag` | exponential, ramp, step | Wheel speed, current and temperature from a motor model |
+| 2 | `wheel_cage` | intermittent, spike | Same |
+| 2 | `wheel_seize` | step | Same, with the speed dropping to 0 |
+| 3 | `clock_drift`, `clock_jump` | step, ramp / step | Clock of the computer against GNSS time |
+| 4 | `sw_reset`, `cdh_hang` | step, intermittent / step | Uptime of the computer |
+| 5 | `feeder_switch_open` | step, intermittent | Voltage and current for each load, bus voltage |
+| 5 | `feeder_sensor_bias`, `feeder_sensor_noise` | step, ramp / step | Same |
+| 5 | `latchup` | recovering, step | A current limit, a trip and the unserved power |
 
-## Identification
+The tank comes first, because the CSV confirms that `isp_loss` shows a normal pressure drop and
+`authority` a low one. The feeder group is the largest change. `wheel_drag` and `wheel_friction` are
+confusable (constant against speed-proportional extra current), and so are `sw_reset` and
+`upset_rate`, and `clock_drift` and `clock_jump`.
 
-- **Residual methods** come from the CSV's own "Residual Method" column. Most map to what exists:
-  Gaussian GLR for offsets, slope GLR for scale or growth, Poisson and binomial GLR for counts.
-- **New tests needed:** a variance GLR (`gyro_noise`, `mag_noise`, `feeder_sensor_noise`,
-  `gnss_noise`), a frozen-signal test (`gyro_stuck`, `st_stuck`, `temp_sensor_freeze`), a CUSUM
-  for `latchup`, and uptime-jump tests for `sw_reset` and `cdh_hang`. Intermittent faults
-  (`wheel_cage`, `gnss_outage`, `st_dropout`) need range-based scoring.
-- **MC dropout:** reuse the dropout MLP plus GLR from `mcdnn.py`. Slow drifts take exogenous-only
-  inputs, since self-history lets the model extrapolate drift (found for F1 and F7).
-- **Multi-satellite:** likely to help only where there is a shared reference. The candidates are
-  `gnss_jump` and `gnss_noise` against crosslink-measured partner states, `clock_drift` against
-  peers, and `tx_fade` against peers' links. Per-vehicle mechanical faults (wheels, burns)
-  probably will not, as F3 to F6 showed.
-- **Confusable groups to plan for:**
-  - `heater_stuck_off`, `temp_sensor_bias` and `insulation_degradation`.
-  - `capacity_fade`, `resistance_growth` and `cell_short`.
-  - `wheel_drag` and `wheel_friction` (constant against speed-proportional extra current).
-  - `gyro_bias` and `st_false_star`.
-  - `sw_reset` and `upset_rate`.
-  - `clock_drift` and `clock_jump`.
-  - `mag_bias` and `mag_coupling`.
-- **Scoring and posterior:** add the CSV's metrics to `score.py` (range-based F1, PA-F1, NAB,
-  false alarms per hour split by eclipse and SAA, onset error, unknown rate, and a confusion
-  matrix over all classes). The posterior's prior changes from one in ten to one in the new
-  class count, and its channels need per-fault labels that start at the first observable effect,
-  not at arm (the F3, F5 and F6 lesson).
+## Step 4: magnetorquers (1 fault, and a rebuild of two others)
 
-## Order of work
+`mtq_stuck` needs magnetorquers and a desaturation law. That changes the wheel momentum and
+therefore every wheel baseline, so it stays off by default and out of the golden runs. The CSV also
+wants `mtq_dipole_am2` and `mtq_coil_a` as telemetry for `mag_coupling`, `mag_bias` and `mtq_stuck`.
+When the magnetorquers exist, add the CSV version of `mag_coupling`. Do this last, and only if wanted.
 
-1. Phase A, in this order: scheduled-parameter plumbing and the new profiles; the sensor faults
-   (IMU, star tracker, GNSS, thermistors); then thermal and power.
-2. Detectors for Phase A, then a batch with the extended fault set and scoring.
-3. Phase B, tank first, since it unlocks F5 against F6. Then wheels, feeders, clock, C&DH, radio.
-4. Phase C if wanted.
-5. Re-run the posterior and the multi-satellite comparison on the extended set.
+## For every fault
 
-## Decisions needed
+1. Write the exit tests first. Seeds with no fault stay bit-identical, and the other vehicles are
+   unchanged.
+2. Add the parameters to `params/` as defaults marked "spec silent", and add the injection point.
+3. Run a forced batch of 200 seeds for each shape.
+4. Build the detector from `mcdnn.py`. Slow drifts use exogenous inputs only, because history lets
+   the network extrapolate the drift. Add a multi-satellite form only where vehicles share a
+   reference. The likeliest cases are `clock_drift` against peers and anything with a common
+   environment. Per-vehicle mechanical faults (wheels, burns) probably gain nothing, as F3 to F6
+   showed.
+5. Score it. Check the false alarms and the first-alarm wrong-id rate.
+6. Fit the posterior.
+7. Add it to the supplement and the artifact.
 
-1. **Authority.** Are the new faults extensions with spec-silent defaults? The CSV's "vendor
-   expected values" column lists ratings (wheel max torque and Kt, tank blowdown curve, feeder
-   resistances, clock ppm and so on) that the repo does not have.
-2. **Vehicle and lead.** Which vehicle does each new fault hit, and does it use the same
-   fault-lead draw as F1 to F10?
-3. **One fault per seed, or several?** The spec has one per seed.
-4. **Phase C.** Is the magnetometer and magnetorquer subsystem wanted, given the risk to wheel
-   dynamics?
+Two checks belong early for every fault. First, look for a nuisance signal that looks like the
+fault. The magnetic field disturbance caused hundreds of false alarms. Second, check the confusion
+groups, because the first alarm often names the wrong fault. These groups are known:
+
+- `heater_stuck_off`, `temp_sensor_bias` and `insulation_degradation` (F7)
+- `capacity_fade`, `resistance_growth` (F1) and `cell_short`
+- `wheel_drag` and `wheel_friction` (F3)
+- `gyro_bias` and `st_false_star`
+- `sw_reset` and `upset_rate` (F9)
+- `clock_drift` and `clock_jump`
+- `mag_bias` and `mag_coupling`
+
+## Cost
+
+One batch of 200 seeds took about 23 min on 24 CPUs. With two shapes each, the 26 faults make about
+50 batches, or roughly 20 h of simulation, plus the detection runs. Most of it belongs on the server.
+Ask before starting any long run.
+
+## Decisions
+
+1. Begin with the gyro faults, then do steps 2-4
+2. Ask me for any numbers you're not sure of
+3. The magnetorquer work is wanted, but we'll need to implement a desaturation law and rerun the wheel baselines afterwards
+4. The simulation is getting really slow. We should focus on making it faster and reusing no-fault runs across different fault experiments when possible
