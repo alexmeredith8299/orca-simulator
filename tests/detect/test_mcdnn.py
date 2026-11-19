@@ -43,10 +43,10 @@ def test_trailing_sum_is_causal() -> None:
 
 def test_registry_names() -> None:
     faults = ("mcd_f2", "mcdn_f8", "mcdn_f9", "mcdn_f10", "mcdn_wheels", "mcdn_burn", "mcdn_gnss",
-              "mcdn_gnssraw", "mcdn_mag")
+              "mcdn_gnssraw", "mcdn_mag", "mcdn_gyro")
     assert set(MCDN) == {f"{f}{s}" for f in faults for s in ("", "_sig", "_sig_comms")} | {
         "mcdn_txfade_sig", "mcdn_txfade_sig_comms", "mcdn_gnssrel", "mcdn_gnssrel_comms",
-        "mcdn_gnsspeer", "mcdn_gnsspeer_comms", "mcdn_gyro"}
+        "mcdn_gnsspeer", "mcdn_gnsspeer_comms"}
     assert not set(detector_names("all")) & set(MCDN)
 
 
@@ -316,6 +316,18 @@ def test_gyro_samples_are_the_gyro_less_the_star_tracker_rate(tmp_path: Path) ->
     assert np.all(np.abs(np.mean(s.y, axis=0)) < 0.5)
     assert abs(np.std(s.aux["rate"][:, 0]) - 15.0 / np.sqrt(2.0)) < 3.0  # the real rate
     assert not s.aux["repeats"].any()  # a healthy gyro never repeats a reading exactly
+
+
+def test_the_peers_gyro_block_and_the_multi_satellite_inputs(tmp_path: Path) -> None:
+    seed = make_batch(tmp_path, ["none"])[0]
+    d = SeedData(tmp_path / f"seed_{seed:05d}")
+    alone = MCDN["mcdn_gyro"](CFG, str(PARAMS_DIR))
+    sig = MCDN["mcdn_gyro_sig"](CFG, str(PARAMS_DIR))
+    block = sig.signal_block(d, "SAT-2")  # type: ignore[attr-defined]
+    assert block.shape == (len(d.measurements("SAT-2")["t_s"]), 6)
+    assert np.all(np.isfinite(block[:, :3]))  # the gyro reads every tick
+    s = sig.samples(d, "SAT-1")  # type: ignore[attr-defined]
+    assert sig.x(d, "SAT-1", s).shape[1] > alone.x(d, "SAT-1", s).shape[1]  # type: ignore[attr-defined]
 
 
 def test_a_stuck_gyro_counts_its_repeated_readings(tmp_path: Path) -> None:

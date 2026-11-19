@@ -10,11 +10,10 @@ The CSV lists 46 fault types. Ten are the spec's F1 to F10, so 36 are new.
 
 | State | Faults |
 |---|---|
-| Simulated, detected and documented (6) | `gnss_jump`, `gnss_noise`, `tx_fade`, `mag_bias`, `mag_noise`, `mag_coupling` |
-| Simulated only (4) | `gyro_bias`, `gyro_scale`, `gyro_noise`, `gyro_stuck` |
+| Simulated, detected and documented (10) | `gnss_jump`, `gnss_noise`, `tx_fade`, `mag_bias`, `mag_noise`, `mag_coupling`, `gyro_bias`, `gyro_scale`, `gyro_noise`, `gyro_stuck` (the posterior does not yet separate `gyro_noise` and `gyro_scale`) |
 | Not built (26) | See the tables under "Remaining work" |
 
-The documentation of the six is in `docs/spec/EXPAND3_Extended_Faults_Supplement.md`.
+The documentation of the ten is in `docs/spec/EXPAND3_Extended_Faults_Supplement.md`.
 
 ## Decisions taken
 
@@ -48,8 +47,8 @@ The documentation of the six is in `docs/spec/EXPAND3_Extended_Faults_Supplement
 ## Step 0: groundwork
 
 1. **Vehicle for each fault.** A fault starts a lead time before the take of its vehicle, and only
-   SAT-2, SAT-3 and SAT-4 fly takes. Put every new fault on one of those three. Move
-   `gyro_bias` (SAT-1), `gyro_scale` (SAT-5) and `gyro_noise` (SAT-6) too. A fault that belongs to a
+   SAT-2, SAT-3 and SAT-4 fly takes. Put every new fault on one of those three. The gyro faults
+   are already on SAT-2 and SAT-3. A fault that belongs to a
    physical part, such as the tank and the thruster, fixes its own vehicle (SAT-4 for burns).
 2. **New shapes.** The injector has step, ramp, exponential and intermittent. Add **spike**
    (`wheel_cage`) and **recovering** (`latchup`, and `dark_current` as the CSV lists it).
@@ -63,9 +62,12 @@ The documentation of the six is in `docs/spec/EXPAND3_Extended_Faults_Supplement
 
 ## Step 1: finish the gyro faults
 
-Add detectors (a variance GLR for `gyro_noise`, a frozen-signal test for `gyro_stuck`, offset and
-slope GLRs for `gyro_bias` and `gyro_scale`). Run batches and document the faults in the supplement.
-This tests the whole process on faults that already run.
+Done on 2026-11-19. The detector is `mcdn_gyro` (gyro against the rate from two star-tracker fixes),
+with offset, slope and variance GLRs and a repeated-reading count, and a multi-satellite form that
+gave no gain. `gyro_bias` and `gyro_stuck` get a posterior. `gyro_noise` and `gyro_scale` do not,
+because one score for each fault cannot separate them from a bias or a stuck gyro. Open: decorrelate
+the scores or fit the posterior on all four, and raise the size of `gyro_scale` (missed on 38 % of
+seeds at 25 %). Both were left as they are for now.
 
 ## Step 2: faults with signals that already exist (12)
 

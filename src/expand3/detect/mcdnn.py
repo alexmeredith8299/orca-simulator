@@ -854,7 +854,13 @@ class McdGyro(_Nn):
     Four scores from the standardised residual: the shift (gyro_bias), the slope on the rate
     (gyro_scale), the variance (gyro_noise), and the run of exactly repeated readings (gyro_stuck),
     which a noisy sensor never produces. A reading that tracks the rate with noise leaves none of
-    the four. There is no multi-satellite form: no other vehicle shares this vehicle's rate.
+    the four.
+
+    In `_sig`, and `_sig_comms` through the crosslink and the ground relay (store and forward), the
+    other vehicles' gyro readings and star-tracker rates are inputs. No other vehicle shares this
+    vehicle's rate, so a peer can only say what the cluster does at the same time (a common
+    attitude law, a burn or a slew in step), and the test is whether that shrinks the healthy
+    residual.
     """
 
     name = "mcdn_gyro"
@@ -862,6 +868,16 @@ class McdGyro(_Nn):
     block_key = "gyro"
     cols: tuple[str, ...] = ("res_x", "res_y", "res_z")
     overrides = (("mcd_epochs", 100), ("mcd_hidden", 32), ("mcd_sigma_floor", 0.5))
+
+    def signal_block(self, d: SeedData, sat: str) -> F64:
+        """(n, 6): the gyro reading and the star-tracker rate in the residual's units, held
+        between the fixes (NaN before the first pair)."""
+        m = d.measurements(sat)
+        gyro = np.stack([m[f"imu_omega_{a}_rad_s_meas"] for a in "xyz"], axis=1)
+        rate = self._rate(m)
+        idx, _ = hold(np.all(np.isfinite(rate), axis=1), 1.0)
+        held = np.where((idx >= 0)[:, None], rate[np.maximum(idx, 0)], np.nan)
+        return np.concatenate([gyro, held], axis=1) / GYRO_UNIT_RAD_S / GYRO_RATE_SCALE
 
     @staticmethod
     def _rate(m: dict[str, F64]) -> F64:
@@ -975,4 +991,4 @@ MCDN |= {c.name: c for c in (McdGnssRel, McdGnssRelComms)}
 MCDN |= {c.name: c for c in (McdGnssPeer, McdGnssPeerComms)}
 MCDN |= _variants(McdMag)
 MCDN |= {c.name: c for c in (McdTxFade, McdTxFadeComms)}
-MCDN[McdGyro.name] = McdGyro
+MCDN |= _variants(McdGyro)

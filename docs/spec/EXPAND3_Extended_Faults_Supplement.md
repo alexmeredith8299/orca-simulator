@@ -4,7 +4,7 @@ Supplement to the Phase I Simulation and Fault Specification · 2026-11-18
 
 ## Overview
 
-The spec defines ten faults, F1 to F10. This supplement adds six more. To make the new faults
+The spec defines ten faults, F1 to F10. This supplement adds ten more. To make the new faults
 possible, it also adds three things to the simulator:
 
 1. An onboard navigation filter. Each vehicle uses it to estimate its own position and velocity
@@ -14,8 +14,9 @@ possible, it also adds three things to the simulator:
 3. A magnetometer. It measures a magnetic field that is noisier than the model that the vehicle
    carries.
 
-The six new faults are `gnss_jump`, `gnss_noise`, `tx_fade`, `mag_bias`, `mag_noise` and
-`mag_coupling`.
+The ten new faults are `gnss_jump`, `gnss_noise`, `tx_fade`, `mag_bias`, `mag_noise`,
+`mag_coupling`, `gyro_bias`, `gyro_scale`, `gyro_noise` and `gyro_stuck`. The four gyro faults use
+the rate gyro and the star tracker that the spec already has, so they need no new sensor.
 
 Someone who has the spec and this document should be able to rebuild all of it. The spec does not
 mention any of these additions. Every value here is a default, and the spec is silent about it. A
@@ -34,6 +35,7 @@ Build:
 - One crosslink fault: `tx_fade`
 - A true magnetic field, a magnetometer, and a reference field that each vehicle holds on board
 - Three magnetometer faults: `mag_bias`, `mag_noise` and `mag_coupling`
+- Four gyro faults: `gyro_bias`, `gyro_scale`, `gyro_noise` and `gyro_stuck`
 
 Do not build detection logic. The navigation filter and the onboard field reference model what a
 vehicle can compute from its own sensors. They use sensor outputs and the commands of the vehicle.
@@ -227,6 +229,23 @@ this residual over 60 s has a standard deviation of about 98 nT. That change is 
 the disturbance itself changes by 88 nT, and the sensor noise, differenced over the same interval,
 changes by 42 nT. The star tracker gives the attitude about half of the time in Sun hold.
 
+## Model: gyroscope (gyro_bias, gyro_scale, gyro_noise, gyro_stuck)
+
+The rate gyro is the spec's `imu` (30 s, 5e-5 rad/s of noise on each axis). The faults act on the
+reading of the sensor and never on the vehicle's motion. A reading with fault is
+
+    omega_meas = scale omega + bias + noise_mult sigma n      (stuck: the last reading taken with stuck = 0)
+
+with the nominal values bias = 0, scale = 1, noise_mult = 1 and stuck = 0, held in
+`sensor_faults.imu`. The scale acts on the true rate only, not on the bias or the noise. A stuck gyro repeats its last healthy reading exactly, and a healthy one never does. The
+faults leave the truth of the run as it is, so a run with one of them reuses the stored fault-free
+truth of its seed.
+
+A detector can build a reference rate from two star-tracker fixes one tick apart, 2 vec(q_k^-1
+q_k+1) / dt. This is accurate to a few 1e-6 rad/s, about a tenth of the gyro noise, and it exists
+only where both fixes exist (about a quarter of the ticks). The vehicle turns at about 1.5e-4 rad/s
+in Sun hold, so a scale error of 25 % is 4e-5 rad/s, below the noise of one reading.
+
 ## Signals
 
 The Signals table in the spec gains these rows:
@@ -250,6 +269,10 @@ These rows are added to the Faults table:
 | mag_bias | SAT-3 | `sensor_faults.mag.bias_nT` | 0 nT | 300 nT on every axis | step or ramp, t_r = 6 h |
 | mag_noise | SAT-4 | `sensor_faults.mag.noise_mult` | 1 | x5 | ramp (t_r = 6 h) or intermittent |
 | mag_coupling | SAT-2 | `sensor_faults.mag.coupling_nT_per_A` | 0 nT/A | 100 nT/A on every axis | step or ramp, t_r = 6 h |
+| gyro_bias | SAT-2 | `sensor_faults.imu.bias_rad_s` | 0 rad/s | 5e-4 rad/s on every axis | step or ramp, t_r = 6 h |
+| gyro_scale | SAT-2 | `sensor_faults.imu.scale` | 1 | x1.25 | step or ramp, t_r = 6 h |
+| gyro_noise | SAT-3 | `sensor_faults.imu.noise_mult` | 1 | x5 | ramp (t_r = 6 h) or intermittent |
+| gyro_stuck | SAT-3 | `sensor_faults.imu.stuck` | 0 | 1 | step |
 
 In the Profile column, the first shape of each row is the default. Intermittent episodes have a mean
 "on" time of 1800 s and a mean "off" time of 3600 s.
@@ -396,11 +419,12 @@ A rebuild should pass these checks:
 
 ## Known issues
 
-- Three gyro faults are on SAT-1, SAT-5 and SAT-6 (`gyro_bias`, `gyro_scale` and `gyro_noise`). The
-  spec says that a fault is on SAT-2, SAT-3 or SAT-4, so these three break the rule. Their start
-  time comes from a take that those vehicles do not fly. Any consumer that reads start times from
-  the recorded takes therefore cannot use them. `mag_coupling` was first on SAT-1 for the same
-  reason, and it was moved to SAT-2 on 2026-11-18. This document does not describe the gyro faults.
+- `gyro_scale` is missed on 38 of 100 seeds at 25 %, in both shapes, because the error is below the
+  gyro noise at the vehicle's slow turn rate. We kept the size. A larger one would be easier to see.
+- In the posterior, `gyro_noise` and `gyro_scale` do not separate from the other gyro faults. A stuck
+  gyro scores far above a noisy one on the noise score, and a bias step scores above the scale fault
+  on the scale score, so one score for each fault cannot fit. They are detected but not identified.
+  `gyro_bias` and `gyro_stuck` are identified.
 - The SAA gate still uses IGRF alone. It does not include the disturbance. F9 and the SAA therefore
   match the spec, and they differ from the field that the magnetometer measures.
 - The drag scale learns only part of a density error. In one test it moved from 1 to about 6, while
