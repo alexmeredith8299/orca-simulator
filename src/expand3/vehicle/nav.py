@@ -73,7 +73,9 @@ def _gravity_gradient(model: OrbitModel, r: F64, v: F64) -> F64:
 def navigate(view: ParamView, model: OrbitModel, t_s: F64, r_fix_km: F64, v_fix_km_s: F64,
              t_cmd_s: F64, a_cmd_m_s2: F64) -> NavSolution:
     """Run the filter over a vehicle's fixes (rows aligned with `t_s`, ascending). `a_cmd_m_s2`
-    (n, 3) is the thrust the vehicle ordered at each time of `t_cmd_s`, held until the next."""
+    (n, 3) is the thrust the vehicle ordered at each time of `t_cmd_s`, held until the next. A
+    fix that is NaN (a GNSS outage) gives no update: the filter coasts on its force model, and the
+    solution is still written at that time."""
     step_s = view.get("signals.nav.step_s")
     accel_sigma = view.get("signals.nav.accel_sigma_m_s2") / M_PER_KM  # km/s^2
     relinearize = round(view.get("signals.nav.linearize_every_fixes"))
@@ -102,16 +104,18 @@ def navigate(view: ParamView, model: OrbitModel, t_s: F64, r_fix_km: F64, v_fix_
         return np.concatenate([y[0], x[_DIM:]])
 
     n = len(t_s)
+    seen = np.isfinite(r_fix_km[:, 0]) & np.isfinite(v_fix_km_s[:, 0])
+    first = int(np.argmax(seen))  # the filter starts at the first fix there is
     r_out = np.empty((n, _AXES))
     v_out = np.empty((n, _AXES))
     scale_out = np.ones(n)
-    x = np.concatenate([r_fix_km[0], v_fix_km_s[0], [1.0]])
+    x = np.concatenate([r_fix_km[first], v_fix_km_s[first], [1.0]])
     cov = np.zeros((_N_STATE, _N_STATE))
     cov[:_DIM, :_DIM] = meas_cov
     cov[_DIM, _DIM] = scale_sigma**2
-    r_out[0], v_out[0] = x[:_AXES], x[_AXES:_DIM]
+    r_out[: first + 1], v_out[: first + 1] = x[:_AXES], x[_AXES:_DIM]
     dt_phi = -1.0
-    for i in range(1, n):
+    for i in range(first + 1, n):
         dt = float(t_s[i] - t_s[i - 1])
         steps = max(round(dt / step_s), 1)
         h = dt / steps
@@ -134,6 +138,9 @@ def navigate(view: ParamView, model: OrbitModel, t_s: F64, r_fix_km: F64, v_fix_
         noise[:_DIM, :_DIM] = accel_sigma**2 * (g @ g.T)
         noise[_DIM, _DIM] = scale_walk**2 * dt
         cov = phi @ cov @ phi.T + noise
+        if not seen[i]:  # an outage: predict only
+            r_out[i], v_out[i], scale_out[i] = x[:_AXES], x[_AXES:_DIM], x[_DIM]
+            continue
         z = np.concatenate([r_fix_km[i], v_fix_km_s[i]])
         gain = cov @ h_mat.T @ np.linalg.inv(h_mat @ cov @ h_mat.T + meas_cov)
         x = x + gain @ (z - h_mat @ x)

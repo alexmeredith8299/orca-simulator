@@ -32,6 +32,7 @@ signals:
 # (docs/extended-faults-plan.md, Phase A). Not in the spec; a fault moves one of them.
 sensor_faults:
   imu: {bias_rad_s: 0.0, scale: 1.0, noise_mult: 1.0, stuck: 0.0}
-  gnss: {offset_m: 0.0, noise_mult: 1.0}
+  gnss: {offset_m: 0.0, noise_mult: 1.0, outage: 0.0}
+  st: {dropout: 0.0, offset_deg: 0.0, stuck: 0.0}
   mag: {bias_nT: 0.0, noise_mult: 1.0, coupling_nT_per_A: 0.0}
   radio: {tx_loss_dB: 0.0}

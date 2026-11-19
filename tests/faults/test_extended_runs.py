@@ -18,6 +18,7 @@ IMU_FAULTS = ["gyro_bias", "gyro_scale", "gyro_noise", "gyro_stuck"]
 GNSS_FAULTS = ["gnss_jump", "gnss_noise"]
 RADIO_FAULTS = ["tx_fade"]
 MAG_FAULTS = ["mag_bias", "mag_noise", "mag_coupling"]
+SENSOR_FAULTS = ["st_dropout", "st_false_star", "st_stuck", "gnss_outage"]  # Step 2
 
 
 @pytest.fixture(scope="module")
@@ -30,7 +31,7 @@ def faulted(params: Params) -> dict[str, MissionRun]:
     return {
         fid: run_mission(params, SEED, duration_s=DURATION_S,
                          fault=FaultConfig(mode="forced", fault_id=fid, lead_s=LEAD_S))
-        for fid in [*IMU_FAULTS, *GNSS_FAULTS, *RADIO_FAULTS, *MAG_FAULTS]
+        for fid in [*IMU_FAULTS, *GNSS_FAULTS, *RADIO_FAULTS, *MAG_FAULTS, *SENSOR_FAULTS]
     }
 
 
@@ -211,3 +212,42 @@ def test_mag_fault_signatures(params: Params, nominal: MissionRun,
     amps = np.interp(i, run.t_s, run.eps[sat].i_A)
     late = i >= run.fault.t_arm_s  # type: ignore[union-attr]
     np.testing.assert_allclose(d[late], 100.0 * amps[late], atol=1e-6)
+
+
+@pytest.mark.parametrize("fid", SENSOR_FAULTS)
+def test_step2_sensor_faults_change_only_their_sensor_after_arm(
+        params: Params, nominal: MissionRun, faulted: dict[str, MissionRun], fid: str) -> None:
+    run = faulted[fid]
+    assert run.fault is not None
+    sat = params.faults.extended[fid].vehicle
+    assert (run.fault.fault_id, run.fault.vehicle) == (fid, sat)
+    np.testing.assert_array_equal(run.omega, nominal.omega)  # nothing physical moves
+    np.testing.assert_array_equal(run.q, nominal.q)
+    for other in run.sats:
+        if other != sat:
+            np.testing.assert_array_equal(run.signals[other].star_tracker.q_meas,
+                                          nominal.signals[other].star_tracker.q_meas)
+            np.testing.assert_array_equal(run.signals[other].gnss_r.meas,
+                                          nominal.signals[other].gnss_r.meas)
+    st, st0 = run.signals[sat].star_tracker, nominal.signals[sat].star_tracker
+    gn, gn0 = run.signals[sat].gnss_r, nominal.signals[sat].gnss_r
+    after = st.t_s >= run.fault.t_arm_s
+    after_g = gn.t_s >= run.fault.t_arm_s
+    np.testing.assert_array_equal(st.q_meas[~after], st0.q_meas[~after])  # before arm: as nominal
+    np.testing.assert_array_equal(gn.meas[~after_g], gn0.meas[~after_g])
+    if fid == "st_dropout":
+        assert not st.available[after].any()
+        assert st0.available[after].any()
+    elif fid == "st_false_star":
+        np.testing.assert_array_equal(st.available, st0.available)
+        both = after & st.available
+        assert not np.array_equal(st.q_meas[both], st0.q_meas[both])
+    elif fid == "st_stuck":
+        fixes = st.q_meas[after & st.available]
+        assert np.ptp(fixes, axis=0).max() == 0.0
+        np.testing.assert_array_equal(st.available, st0.available)
+    else:
+        assert np.isnan(gn.meas[after_g]).all()
+        nav = run.signals[sat].nav_r
+        assert np.isfinite(nav.meas).all()  # the filter coasts and still reports
+        np.testing.assert_array_equal(st.q_meas, st0.q_meas)

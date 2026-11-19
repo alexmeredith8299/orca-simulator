@@ -89,7 +89,8 @@ def gnss(rng: np.random.Generator, view: ParamView, t_s: F64, r_km: F64, v_km_s:
          ) -> tuple[Sampled, Sampled]:
     """Spec: GNSS position and velocity, truth + N(0, 1.5 m), N(0, 5 cm/s) per axis, every 60 s.
     Extended faults (gnss_jump, gnss_noise): a position offset on every axis, and the noise
-    times its multiplier on position and velocity."""
+    times its multiplier on position and velocity. gnss_outage: the fixes are NaN, on the same
+    grid and with the same draws."""
     m = every(t_s, view.get("signals.gnss.rate_s"))
     ts = t_s[m]
     n = int(m.sum())
@@ -97,8 +98,10 @@ def gnss(rng: np.random.Generator, view: ParamView, t_s: F64, r_km: F64, v_km_s:
     dv = rng.normal(0.0, view.get("signals.gnss.vel_sigma_m_s") / M_PER_KM, (n, 3))
     mult = view.get_series("sensor_faults.gnss.noise_mult", ts)[:, None]
     offset = view.get_series("sensor_faults.gnss.offset_m", ts)[:, None] / M_PER_KM
-    return (Sampled(ts, r_km[m] + dr * mult + offset, r_km[m].copy()),
-            Sampled(ts, v_km_s[m] + dv * mult, v_km_s[m].copy()))
+    lost = view.get_series("sensor_faults.gnss.outage", ts)[:, None] > 0.5  # gnss_outage
+    pos = np.where(lost, np.nan, r_km[m] + dr * mult + offset)
+    vel = np.where(lost, np.nan, v_km_s[m] + dv * mult)
+    return Sampled(ts, pos, r_km[m].copy()), Sampled(ts, vel, v_km_s[m].copy())
 
 
 def magnetometer(rng: np.random.Generator, view: ParamView, t_s: F64, b_body_nT: F64,
@@ -159,13 +162,20 @@ def star_tracker_available(view: ParamView, q: F64, r_eci_km: F64, sun_eci: F64)
 
 def star_tracker(rng: np.random.Generator, view: ParamView, t_s: F64, q: F64, r_eci_km: F64,
                  sun_eci: F64) -> StarTrackerSignal:
-    """Spec: attitude fix with cross-boresight and roll noise, none inside the exclusions."""
+    """Spec: attitude fix with cross-boresight and roll noise, none inside the exclusions.
+    Extended faults (Step 2): st_dropout (no fix), st_false_star (a fixed rotation about an axis
+    drawn once, on fixes that stay valid) and st_stuck (the last fix before the freeze, repeated
+    wherever a fix would exist)."""
     m = every(t_s, view.get("signals.star_tracker.rate_s"))
     n = int(m.sum())
     sig = _ARCSEC_RAD * np.array([view.get("star_tracker.noise_cross_arcsec"),
                                   view.get("star_tracker.noise_cross_arcsec"),
                                   view.get("star_tracker.noise_roll_arcsec")])
-    phi_body = (rng.normal(size=(n, 3)) * sig) @ tracker_basis(view).T
+    basis = tracker_basis(view)
+    phi_body = (rng.normal(size=(n, 3)) * sig) @ basis.T
+    axis_tr = rng.normal(size=3)  # drawn after the noise, so the noise draws do not move
+    offset = np.deg2rad(view.get_series("sensor_faults.st.offset_deg", t_s[m]))[:, None]
+    phi_body = phi_body + offset * (axis_tr / np.linalg.norm(axis_tr)) @ basis.T
     angle = np.linalg.norm(phi_body, axis=-1)
     axis = phi_body / np.where(angle > 0, angle, 1.0)[:, None]
     dq = np.concatenate([np.cos(angle / 2)[:, None], np.sin(angle / 2)[:, None] * axis], axis=1)
@@ -175,8 +185,25 @@ def star_tracker(rng: np.random.Generator, view: ParamView, t_s: F64, q: F64, r_
     q_meas = np.concatenate([w1 * w2 - np.sum(v1 * v2, -1, keepdims=True),
                              w1 * v2 + w2 * v1 + np.cross(v1, v2)], axis=1)
     available = star_tracker_available(view, qt, r_eci_km[m], sun_eci[m])
+    available &= view.get_series("sensor_faults.st.dropout", t_s[m]) < 0.5
     q_meas[~available] = np.nan
+    stuck = view.get_series("sensor_faults.st.stuck", t_s[m]) > 0.5
+    if stuck.any():
+        q_meas = _freeze_fixes(q_meas, stuck)
     return StarTrackerSignal(t_s[m], available, q_meas, qt.copy())
+
+
+def _freeze_fixes(q: F64, stuck: B) -> F64:
+    """Where `stuck`, every fix that would exist repeats the last fix taken before the freeze
+    (the first fix if there was none); a missing fix stays missing."""
+    out = np.array(q, dtype=np.float64)
+    good = np.flatnonzero(~stuck & np.isfinite(q[:, 0]))
+    if not good.size:
+        return out
+    last = np.maximum(np.searchsorted(good, np.arange(len(q))) - 1, 0)
+    sel = stuck & np.isfinite(q[:, 0])
+    out[sel] = q[good[last]][sel]
+    return out
 
 
 def hold_last_healthy(meas: F64, flag: F64) -> F64:

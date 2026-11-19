@@ -91,6 +91,27 @@ Order: the sensor faults, then thermal, then power. The power faults are confusa
 `resistance_growth` (F1), so plan the isolation tests there. The CSV pairs `st_false_star` and
 `st_stuck` with `st_dropout`, and the gyro faults with `st_false_star`.
 
+### Step 2 sizes (approved 2026-11-19; every value is a default, spec silent)
+
+| Fault | Vehicle | Size | Shapes |
+|---|---|---|---|
+| `st_dropout` | SAT-3 | No fix after arm (intermittent: none during "on") | step, intermittent |
+| `st_false_star` | SAT-2 | One fixed 0.5 deg rotation about an axis drawn once per seed, fix still valid | step |
+| `st_stuck` | SAT-4 | The fix freezes at its last value, still marked valid | step |
+| `gnss_outage` | SAT-4 | No fixes after arm; the nav filter coasts | step, intermittent |
+| `temp_sensor_bias` | SAT-2 | +5 K on the battery thermistor (positive on purpose: a negative bias would cross the 276 K charge inhibit and change the physics) | step, ramp |
+| `temp_sensor_freeze` | SAT-3 | The battery thermistor holds its last reading | step |
+| `heater_stuck_on` | SAT-3 | Battery heater forced on (15 W) until the 313 K true-temperature cutoff | step |
+| `heater_stuck_off` | SAT-2 | Battery heater never turns on. It shows only in cold cases, because a nominal battery never reaches the 283 K on-threshold (accepted) | step |
+| `radiator_degradation` | SAT-2 | `bus_nz` white-paint radiator, emissivity 0.85 to 0.60 (x0.7) | ramp |
+| `panel_efficiency` | SAT-2 | All four strings x0.85 (-15 % array power) | exponential, ramp |
+| `capacity_fade` | SAT-2 | Pack capacity x0.75 (3.6 MJ to 2.7 MJ). Capacity is read once per `Eps` today, so it needs a per-tick read | ramp, step |
+| `cell_short` | SAT-2 | Pack open-circuit voltage -3.75 V (one of eight series cells) and capacity x0.75. May reach the 26.4 V undervoltage shed at low SoC | step |
+
+The sensor group (the first four) is built. The seeded extended draw now covers more faults, so a
+`--fault-set extended` seed without a forced fault can draw a different fault than before. Forced
+batches are not affected.
+
 ## Step 3: faults that need new signals (13)
 
 | Order | Faults | CSV shapes | New signals |

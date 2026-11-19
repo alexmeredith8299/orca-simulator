@@ -195,7 +195,7 @@ def measurement_columns(run: MissionRun, params: Params) -> dict[str, Any]:
         add("sat_id", np.full(n_t, sat))
         add("t_s", t)
         gi = _tick_index(t, sig.gnss_r.t_s)
-        add("gnss_valid", np.isin(np.arange(n_t), gi))
+        add("gnss_valid", np.isin(np.arange(n_t), gi[np.isfinite(sig.gnss_r.meas[:, 0])]))
         for i, a in enumerate(_AXES):
             pair(f"gnss_r_{a}_km", gi, sig.gnss_r.meas[:, i], sig.gnss_r.truth[:, i])
         for i, a in enumerate(_AXES):

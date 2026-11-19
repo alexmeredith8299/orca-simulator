@@ -30,3 +30,12 @@ tx_fade: {name: crosslink transmit fade, vehicle: SAT-2, param: sensor_faults.ra
 mag_bias:     {name: magnetometer bias, vehicle: SAT-3, param: sensor_faults.mag.bias_nT, set_to: 300.0, profile: step, shapes: [step, ramp], t_r_s: 21600}
 mag_noise:    {name: magnetometer noise, vehicle: SAT-4, param: sensor_faults.mag.noise_mult, m: 5, profile: ramp, shapes: [ramp, intermittent], t_r_s: 21600, t_on_s: 1800, t_off_s: 3600}
 mag_coupling: {name: magnetometer current coupling, vehicle: SAT-2, param: sensor_faults.mag.coupling_nT_per_A, set_to: 100.0, profile: step, shapes: [step, ramp], t_r_s: 21600}
+
+# Star tracker and GNSS receiver (Step 2). Tracker noise is 2 arcsec across and 20 arcsec about the
+# boresight, so 0.5 deg is 25 to 250 times the noise. The false star is one fixed rotation about an
+# axis drawn once per seed, on fixes that stay marked valid; the stuck tracker repeats its last
+# fix. A dropout and an outage remove every fix (step), or the fixes of the "on" episodes.
+st_dropout:    {name: star tracker dropout, vehicle: SAT-3, param: sensor_faults.st.dropout, set_to: 1, profile: step, shapes: [step, intermittent], t_on_s: 1800, t_off_s: 3600}
+st_false_star: {name: star tracker false star, vehicle: SAT-2, param: sensor_faults.st.offset_deg, set_to: 0.5, profile: step}
+st_stuck:      {name: star tracker stuck, vehicle: SAT-4, param: sensor_faults.st.stuck, set_to: 1, profile: step}
+gnss_outage:   {name: GNSS outage, vehicle: SAT-4, param: sensor_faults.gnss.outage, set_to: 1, profile: step, shapes: [step, intermittent], t_on_s: 1800, t_off_s: 3600}
