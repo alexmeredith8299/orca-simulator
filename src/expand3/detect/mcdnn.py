@@ -56,6 +56,8 @@ F32 = NDArray[np.float32]
 IntArr = NDArray[np.int64]
 N_WHEELS = 4
 N_STRINGS = 4
+GYRO_UNIT_RAD_S = 1.0e-5  # gyro residuals are scored in units of this, about a fifth of its noise
+GYRO_RATE_SCALE = 10.0  # the rate input and regressor in these units, about its typical size
 M_PER_KM = 1000.0  # the batch tables carry km and km/s; the misses are scored in m and m/s
 
 
@@ -841,6 +843,76 @@ class McdMag(_Nn):
         return out
 
 
+class McdGyro(_Nn):
+    """The gyro against the star tracker (extended faults gyro_bias, gyro_scale, gyro_noise and
+    gyro_stuck). Two fixes one tick apart give the body rate, 2 vec(q_k^-1 q_k+1) / dt, to a few
+    1e-6 rad/s, a tenth of the gyro's noise. A sample is the gyro reading minus that rate on the
+    three axes, wherever both fixes exist (about a quarter of the ticks). Its inputs are the context
+    features and the rate itself, so the network learns what a healthy gyro leaves, which is its
+    noise and the finite difference during a slew.
+
+    Four scores from the standardised residual: the shift (gyro_bias), the slope on the rate
+    (gyro_scale), the variance (gyro_noise), and the run of exactly repeated readings (gyro_stuck),
+    which a noisy sensor never produces. A reading that tracks the rate with noise leaves none of
+    the four. There is no multi-satellite form: no other vehicle shares this vehicle's rate.
+    """
+
+    name = "mcdn_gyro"
+    fault_ids = ("gyro_bias", "gyro_scale", "gyro_noise", "gyro_stuck")
+    block_key = "gyro"
+    cols: tuple[str, ...] = ("res_x", "res_y", "res_z")
+    overrides = (("mcd_epochs", 100), ("mcd_hidden", 32), ("mcd_sigma_floor", 0.5))
+
+    @staticmethod
+    def _rate(m: dict[str, F64]) -> F64:
+        """(n, 3): body rate [rad/s] from the fixes at k and k + 1, stored at k + 1 (when it is
+        known); NaN where either fix is missing."""
+        q = np.stack([m[f"st_q_{c}_meas"] for c in "wxyz"], axis=1)
+        out = np.full((len(q), 3), np.nan)
+        a, b = q[:-1], q[1:]
+        d = np.stack([
+            a[:, 0] * b[:, 1] - a[:, 1] * b[:, 0] - a[:, 2] * b[:, 3] + a[:, 3] * b[:, 2],
+            a[:, 0] * b[:, 2] + a[:, 1] * b[:, 3] - a[:, 2] * b[:, 0] - a[:, 3] * b[:, 1],
+            a[:, 0] * b[:, 3] - a[:, 1] * b[:, 2] + a[:, 2] * b[:, 1] - a[:, 3] * b[:, 0],
+        ], axis=1)  # vector part of conj(a) b
+        scalar = a[:, 0] * b[:, 0] + a[:, 1] * b[:, 1] + a[:, 2] * b[:, 2] + a[:, 3] * b[:, 3]
+        dt = np.diff(m["t_s"])[:, None]
+        out[1:] = 2.0 * np.where(scalar[:, None] < 0, -d, d) / dt
+        return out
+
+    def samples(self, d: SeedData, sat: str) -> Samples:
+        m = d.measurements(sat)
+        gyro = np.stack([m[f"imu_omega_{a}_rad_s_meas"] for a in "xyz"], axis=1)
+        rate = self._rate(m)
+        same = np.all(gyro[1:] == gyro[:-1], axis=1)
+        repeats = np.zeros(len(gyro))
+        for n in range(1, len(gyro)):
+            repeats[n] = repeats[n - 1] + 1.0 if same[n - 1] else 0.0
+        pick = np.flatnonzero(np.all(np.isfinite(rate), axis=1))
+        pick = pick[pick >= 1]
+        if not pick.size:
+            return _empty(3, 3)
+        res = (gyro[pick - 1] - rate[pick]) / GYRO_UNIT_RAD_S  # the gyro read at k - 1
+        local = rate[pick] / GYRO_UNIT_RAD_S / GYRO_RATE_SCALE
+        return Samples(m["t_s"][pick], pick.astype(np.int64), local, res,
+                       {"rate": rate[pick] / GYRO_UNIT_RAD_S, "repeats": repeats[pick - 1]})
+
+    def score(self, d: SeedData, per: dict[str, tuple[Samples, F64, F64]]) -> list[Trace]:
+        out = []
+        w = self.cfg.nn_gyro_window
+        for sat, (s, mean, std) in per.items():
+            z = np.nan_to_num((s.y - mean) / std)
+            rate = s.aux["rate"] / GYRO_RATE_SCALE
+            shift = sum(gaussian_glr(z[:, j], 0.0, 1.0, w) for j in range(3))
+            slope = sum(slope_glr(z[:, j], rate[:, j], 1.0, w) for j in range(3))
+            spread = variance_glr(np.mean(z**2, axis=1), w, 3)
+            out += [Trace(sat, "gyro_bias", s.t, np.asarray(shift)),
+                    Trace(sat, "gyro_scale", s.t, np.asarray(slope)),
+                    Trace(sat, "gyro_noise", s.t, np.asarray(spread)),
+                    Trace(sat, "gyro_stuck", s.t, s.aux["repeats"].astype(np.float64))]
+        return out
+
+
 # ---- F2: string power, an LSTM like the thermal detectors ------------------------------------
 class McdStrings(_MultiView, McdThermal):
     """F2: each string's power while sunlit, scored for a drop."""
@@ -903,3 +975,4 @@ MCDN |= {c.name: c for c in (McdGnssRel, McdGnssRelComms)}
 MCDN |= {c.name: c for c in (McdGnssPeer, McdGnssPeerComms)}
 MCDN |= _variants(McdMag)
 MCDN |= {c.name: c for c in (McdTxFade, McdTxFadeComms)}
+MCDN[McdGyro.name] = McdGyro

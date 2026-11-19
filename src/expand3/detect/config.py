@@ -87,6 +87,7 @@ class DetectConfig:
     nn_gnss_window: int = 36
     nn_txfade_window: int = 60
     nn_mag_window: int = 36
+    nn_gyro_window: int = 36
     # raw-signal classifier: trailing windows over the measured signals
     raw_windows_s: tuple[float, ...] = (3600.0, 21600.0)
     raw_count_windows_s: tuple[float, ...] = (21600.0, 86400.0, 1e12)

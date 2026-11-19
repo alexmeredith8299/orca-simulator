@@ -6,9 +6,9 @@
 episode_horizon_s: 3.6e5   # intermittent episodes are drawn out to here (100 h)
 
 # IMU: rate noise is 5e-5 rad/s (1 sigma). Bias 10 sigma on every axis, scale 25 %, noise x5.
-gyro_bias:  {name: gyro bias, vehicle: SAT-1, param: sensor_faults.imu.bias_rad_s, set_to: 5.0e-4, profile: step, shapes: [step, ramp], t_r_s: 21600}
-gyro_scale: {name: gyro scale factor, vehicle: SAT-5, param: sensor_faults.imu.scale, m: 1.25, profile: step, shapes: [step, ramp], t_r_s: 21600}
-gyro_noise: {name: gyro noise, vehicle: SAT-6, param: sensor_faults.imu.noise_mult, m: 5, profile: ramp, shapes: [ramp, intermittent], t_r_s: 21600, t_on_s: 1800, t_off_s: 3600}
+gyro_bias:  {name: gyro bias, vehicle: SAT-2, param: sensor_faults.imu.bias_rad_s, set_to: 5.0e-4, profile: step, shapes: [step, ramp], t_r_s: 21600}
+gyro_scale: {name: gyro scale factor, vehicle: SAT-2, param: sensor_faults.imu.scale, m: 1.25, profile: step, shapes: [step, ramp], t_r_s: 21600}
+gyro_noise: {name: gyro noise, vehicle: SAT-3, param: sensor_faults.imu.noise_mult, m: 5, profile: ramp, shapes: [ramp, intermittent], t_r_s: 21600, t_on_s: 1800, t_off_s: 3600}
 gyro_stuck: {name: gyro stuck, vehicle: SAT-3, param: sensor_faults.imu.stuck, set_to: 1, profile: step}
 
 # GNSS: fix noise is 1.5 m and 5 cm/s (1 sigma). The jump is 10 m on every axis (17 m, 11 sigma),

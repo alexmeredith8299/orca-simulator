@@ -16,9 +16,12 @@ TAKE_S = 80000.0
 LAMBDA_IN = 5.5e-4
 D0, T_REF, DT_D = 10.0, 293.15, 6.5
 FAULT_VEHICLE = {"gnss_jump": "SAT-2", "gnss_noise": "SAT-2", "tx_fade": "SAT-2",
-                 "mag_bias": "SAT-2", "mag_noise": "SAT-2", "mag_coupling": "SAT-2",
+                 "gyro_bias": "SAT-2", "gyro_scale": "SAT-2", "gyro_noise": "SAT-3",
+                 "gyro_stuck": "SAT-3", "mag_bias": "SAT-2", "mag_noise": "SAT-2",
+                 "mag_coupling": "SAT-2",
                  "F1": "SAT-2", "F2": "SAT-2", "F3": "SAT-3", "F4": "SAT-3", "F5": "SAT-2",
-                 "F6": "SAT-2", "F7": "SAT-2", "F8": "SAT-2", "F9": "SAT-2", "F10": "SAT-2"}
+                 "F6": "SAT-2", "F7": "SAT-2", "F8": "SAT-2", "F9": "SAT-2",
+                 "F10": "SAT-2"}
 MU, A_KM, PERIOD_S = 398600.4418, 6903.137, 5700.0
 INCL = np.deg2rad(97.5)
 BURNS = {"SAT-2": (ARM_S + 600.0, END_S), "SAT-3": (30000.0, 50000.0)}  # [start, end) in s
@@ -151,6 +154,41 @@ def _gnss_kepler(t: np.ndarray, k: int, fault: str, faulted: bool, rng: np.rando
     return out
 
 
+def _gyro(t: np.ndarray, k: int, fault: str, faulted: bool, available: np.ndarray,
+          rng: np.random.Generator) -> dict[str, np.ndarray]:
+    """The body rate, the gyro that reads it and the star tracker's attitude fixes. The rate is a
+    slow oscillation of the size of the orbit rate; the fixes are the attitude that rate
+    integrates to, with the tracker's noise, and absent where the tracker has no fix."""
+    n = t.size
+    phase = rng.uniform(0.0, 2 * np.pi, 3)
+    omega = 1.5e-4 * np.sin(2 * np.pi * t[:, None] / PERIOD_S + phase)
+    q = np.zeros((n, 4))
+    q[0] = [1.0, 0.0, 0.0, 0.0]
+    for i in range(n - 1):
+        w = np.linalg.norm(omega[i])
+        half = 0.5 * w * TICK_S
+        dq = np.concatenate([[np.cos(half)], np.sin(half) * omega[i] / max(w, 1e-12)])
+        a = q[i]
+        q[i + 1] = [a[0] * dq[0] - a[1] * dq[1] - a[2] * dq[2] - a[3] * dq[3],
+                    a[0] * dq[1] + a[1] * dq[0] + a[2] * dq[3] - a[3] * dq[2],
+                    a[0] * dq[2] - a[1] * dq[3] + a[2] * dq[0] + a[3] * dq[1],
+                    a[0] * dq[3] + a[1] * dq[2] - a[2] * dq[1] + a[3] * dq[0]]
+    q += 1.0e-5 * rng.standard_normal((n, 4))  # tracker noise, about 2 arcsec
+    q /= np.linalg.norm(q, axis=1, keepdims=True)
+    post = (t >= ARM_S) & faulted
+    scale = np.where(post & (fault == "gyro_scale"), 1.25, 1.0)[:, None]
+    bias = np.where(post & (fault == "gyro_bias"), 5.0e-4, 0.0)[:, None]
+    mult = np.where(post & (fault == "gyro_noise"), 5.0, 1.0)[:, None]
+    meas = omega * scale + bias + 5.0e-5 * mult * rng.standard_normal((n, 3))
+    if faulted and fault == "gyro_stuck":
+        first = int(np.argmax(t >= ARM_S))
+        meas[first:] = meas[first - 1]
+    out = {f"imu_omega_{ax}_rad_s_meas": meas[:, i] for i, ax in enumerate("xyz")}
+    for i, c in enumerate("wxyz"):
+        out[f"st_q_{c}_meas"] = np.where(available > 0, q[:, i], np.nan)
+    return out
+
+
 def make_seed(out: Path, seed: int, fault: str, kepler: bool = False) -> Path:
     """Three vehicles, a day. Fault `none` or F2, F3, F4, F8, F9, F10 on its vehicle from ARM_S."""
     rng = np.random.default_rng(seed)
@@ -211,6 +249,14 @@ def make_seed(out: Path, seed: int, fault: str, kepler: bool = False) -> Path:
         for ax in "xyz":
             cols[f"imu_omega_{ax}_rad_s_meas"] += list(5e-5 * rng.standard_normal(n))
     del meas
+    gyro_rng = np.random.default_rng(seed + 50_000)  # its own stream, as the fixes
+    for k, sat in enumerate(SATS):
+        g = _gyro(t, k, fault, sat == vehicle,
+                  np.array(cols["st_available"][k * n:(k + 1) * n]), gyro_rng)
+        for name, v in g.items():
+            if name not in cols:
+                cols[name] = [0.0] * (n * len(SATS))
+            cols[name][k * n:(k + 1) * n] = list(v)
     nav_rng = np.random.default_rng(seed + 10_000)  # its own stream: the others are unchanged
     nav = [_gnss_kepler(t, k, fault, sat == vehicle, nav_rng) if kepler
            else _gnss(t, k, fault, sat == vehicle, sat, nav_rng) for k, sat in enumerate(SATS)]

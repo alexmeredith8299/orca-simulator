@@ -46,7 +46,7 @@ def test_registry_names() -> None:
               "mcdn_gnssraw", "mcdn_mag")
     assert set(MCDN) == {f"{f}{s}" for f in faults for s in ("", "_sig", "_sig_comms")} | {
         "mcdn_txfade_sig", "mcdn_txfade_sig_comms", "mcdn_gnssrel", "mcdn_gnssrel_comms",
-        "mcdn_gnsspeer", "mcdn_gnsspeer_comms"}
+        "mcdn_gnsspeer", "mcdn_gnsspeer_comms", "mcdn_gyro"}
     assert not set(detector_names("all")) & set(MCDN)
 
 
@@ -300,3 +300,45 @@ def test_the_magnetometer_faulted_vehicles_score_stands_out(tmp_path: Path, name
     # looks like a shift), so it has the smallest margin
     margin = 2.0 if kind == "mag_coupling" else 3.0
     assert top["SAT-2"] > margin * max(others, 1.0), (kind, top)
+
+
+def test_gyro_samples_are_the_gyro_less_the_star_tracker_rate(tmp_path: Path) -> None:
+    seed = make_batch(tmp_path, ["none"])[0]
+    d = SeedData(tmp_path / f"seed_{seed:05d}")
+    det = MCDN["mcdn_gyro"](CFG, str(PARAMS_DIR))
+    s = det.samples(d, "SAT-1")  # type: ignore[attr-defined]
+    m = d.measurements("SAT-1")
+    # a sample needs fixes at both ends of the step: about a quarter of the ticks
+    assert 0.15 < len(s.t) / len(m["t_s"]) < 0.35
+    assert s.y.shape[1] == 3
+    # residuals are in units of 1e-5 rad/s: the gyro's noise (5), not the tracker's
+    assert np.allclose(np.std(s.y, axis=0), 5.0, rtol=0.1)
+    assert np.all(np.abs(np.mean(s.y, axis=0)) < 0.5)
+    assert abs(np.std(s.aux["rate"][:, 0]) - 15.0 / np.sqrt(2.0)) < 3.0  # the real rate
+    assert not s.aux["repeats"].any()  # a healthy gyro never repeats a reading exactly
+
+
+def test_a_stuck_gyro_counts_its_repeated_readings(tmp_path: Path) -> None:
+    seed = make_batch(tmp_path, ["gyro_stuck"])[0]
+    d = SeedData(tmp_path / f"seed_{seed:05d}")
+    det = MCDN["mcdn_gyro"](CFG, str(PARAMS_DIR))
+    s = det.samples(d, "SAT-3")  # type: ignore[attr-defined]
+    late = s.t > d.t_arm_s + 600.0  # type: ignore[operator]
+    assert np.all(s.aux["repeats"][late] >= 20)
+    assert not s.aux["repeats"][s.t < d.t_arm_s].any()  # type: ignore[operator]
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(("kind", "vehicle"), [
+    ("gyro_bias", "SAT-2"), ("gyro_scale", "SAT-2"), ("gyro_noise", "SAT-3"),
+    ("gyro_stuck", "SAT-3")])
+def test_the_gyro_faulted_vehicles_score_stands_out(tmp_path: Path, kind: str,
+                                                    vehicle: str) -> None:
+    seeds = make_batch(tmp_path, [*(["none"] * 6), kind])
+    keep: dict[str, object] = {}
+    cfg = replace(CFG, mcd_epochs=40, mcd_batch=64)
+    run_detectors(tmp_path, ["mcdn_gyro"], seeds[:6], seeds[6:], cfg, PARAMS_DIR, keep=keep)
+    traces = keep["traces"][seeds[6]][0]["mcdn_gyro"]  # type: ignore[index]
+    top = {t.sat_id: float(np.max(t.score)) for t in traces if t.fault_id == kind}
+    others = max(v for s, v in top.items() if s != vehicle)
+    assert top[vehicle] > 3.0 * max(others, 1.0), (kind, top)
