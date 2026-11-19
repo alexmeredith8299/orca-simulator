@@ -10,6 +10,7 @@ import copy
 import itertools
 import re
 from collections.abc import Callable, Mapping
+from functools import cache
 from pathlib import Path
 from typing import Annotated, Any, Literal, Self
 
@@ -643,6 +644,19 @@ def load_params(directory: str | Path) -> Params:
 _SEGMENT = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)((?:\[\d+\])*)")
 
 
+@cache
+def _parse_path(path: str) -> tuple[str | int, ...]:
+    """A dotted parameter path as the keys and indices to follow, parsed once."""
+    keys: list[str | int] = []
+    for part in path.split("."):
+        m = _SEGMENT.fullmatch(part)
+        if m is None:
+            raise KeyError(f"bad parameter path {path!r}")
+        keys.append(m.group(1))
+        keys.extend(int(i) for i in re.findall(r"\[(\d+)\]", m.group(2)))
+    return tuple(keys)
+
+
 class ParamView:
     """Read-only, per-vehicle view over Params that model code reads every number through.
 
@@ -678,13 +692,8 @@ class ParamView:
 
     def _lookup(self, path: str) -> Any:
         node: Any = self._tree
-        for part in path.split("."):
-            m = _SEGMENT.fullmatch(part)
-            if m is None:
-                raise KeyError(f"bad parameter path {path!r}")
-            node = node[m.group(1)]
-            for idx in re.findall(r"\[(\d+)\]", m.group(2)):
-                node = node[int(idx)]
+        for key in _parse_path(path):
+            node = node[key]
         return node
 
     def at(self, t_s: float) -> ParamView:

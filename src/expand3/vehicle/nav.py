@@ -17,7 +17,6 @@ The filter reads the fixes and nothing else; the true state is never an input.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from functools import partial
 
 import numpy as np
 from numpy.typing import NDArray
@@ -26,7 +25,7 @@ from scipy.linalg import expm
 from expand3.params import Draw, Params, ParamView
 from expand3.timebase import SeedDraws, draw_seed
 from expand3.units import M_PER_KM
-from expand3.vehicle.orbit import Forces, OrbitModel, rk4_step
+from expand3.vehicle.orbit import Forces, OrbitModel
 
 F64 = NDArray[np.float64]
 
@@ -93,12 +92,14 @@ def navigate(view: ParamView, model: OrbitModel, t_s: F64, r_fix_km: F64, v_fix_
         out: F64 = (full - no_drag.accel(r[None, :], v[None, :]))[0]
         return out
 
-    def deriv(y: F64, a_thr: F64, a_drag: F64) -> F64:
-        """The drag acceleration is held at its value at the start of the fix interval (it
-        changes by well under a percent in 60 s) and scaled by the state."""
-        r, v, scale = y[:_AXES], y[_AXES:_DIM], y[_DIM]
-        acc = no_drag.accel(r[None, :], v[None, :])[0] + scale * a_drag + a_thr
-        return np.concatenate([v, acc, [0.0]])
+    unit_mass = np.ones(1)
+
+    def step(x: F64, h: float, a_thr: F64, a_drag: F64) -> F64:
+        """One RK4 step. The drag acceleration is held at its value at the start of the fix
+        interval (it changes by well under a percent in 60 s) and scaled by the state, which is
+        constant in a step, so drag and thrust enter as one held acceleration."""
+        y = no_drag.rk4(x[None, :_DIM], h, (x[_DIM] * a_drag + a_thr)[None, :], unit_mass)
+        return np.concatenate([y[0], x[_DIM:]])
 
     n = len(t_s)
     r_out = np.empty((n, _AXES))
@@ -127,7 +128,7 @@ def navigate(view: ParamView, model: OrbitModel, t_s: F64, r_fix_km: F64, v_fix_
         for j in range(steps):
             k = max(int(np.searchsorted(t_cmd_s, t_s[i - 1] + j * h, side="right")) - 1, 0)
             a_thr = a_cmd_m_s2[k] / M_PER_KM
-            x = rk4_step(partial(deriv, a_thr=a_thr, a_drag=a_drag), x, h)
+            x = step(x, h, a_thr, a_drag)
         g = np.concatenate([np.eye(_AXES) * dt**2 / 2.0, np.eye(_AXES) * dt])
         noise = np.zeros((_N_STATE, _N_STATE))
         noise[:_DIM, :_DIM] = accel_sigma**2 * (g @ g.T)

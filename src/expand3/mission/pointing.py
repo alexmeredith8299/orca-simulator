@@ -14,6 +14,8 @@ secondary body axis comes as close as possible to a second direction.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 from numpy.typing import NDArray
 
@@ -36,13 +38,22 @@ def axis_from_label(label: str) -> F64:
 
 
 def _frame(p: F64, s: F64) -> F64:
-    t1 = p / np.linalg.norm(p)
-    t2 = np.cross(t1, s)
-    n2 = np.linalg.norm(t2)
+    """Orthonormal columns [t1, t2, t1 x t2] with t1 along p and t2 normal to p and s. Written in
+    scalars: this runs every tick, and numpy's overhead on three numbers dominates."""
+    p0, p1, p2 = float(p[0]), float(p[1]), float(p[2])
+    n1 = math.sqrt(p0 * p0 + p1 * p1 + p2 * p2)
+    a0, a1, a2 = p0 / n1, p1 / n1, p2 / n1
+    c0 = a1 * float(s[2]) - a2 * float(s[1])
+    c1 = a2 * float(s[0]) - a0 * float(s[2])
+    c2 = a0 * float(s[1]) - a1 * float(s[0])
+    n2 = math.sqrt(c0 * c0 + c1 * c1 + c2 * c2)
     if n2 < 1e-12:
         raise ValueError("TRIAD directions are parallel; roll is undefined")
-    t2 = t2 / n2
-    return np.column_stack([t1, t2, np.cross(t1, t2)])
+    b0, b1, b2 = c0 / n2, c1 / n2, c2 / n2
+    out: F64 = np.array([[a0, b0, a1 * b2 - a2 * b1],
+                         [a1, b1, a2 * b0 - a0 * b2],
+                         [a2, b2, a0 * b1 - a1 * b0]])
+    return out
 
 
 def triad(b1: F64, i1: F64, b2: F64, i2: F64) -> F64:

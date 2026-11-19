@@ -15,6 +15,7 @@ import hashlib
 import json
 import multiprocessing
 import os
+import pickle
 import platform
 import shutil
 import subprocess
@@ -28,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from expand3.faults import FaultConfig, draw_fault, draw_fault_extended
-from expand3.mission.thread import run_mission
+from expand3.mission.thread import Truth, compute_truth, reuses_baseline, run_mission
 from expand3.params import load_params
 from expand3.recorder import write_run
 from expand3.timebase import draw_seed
@@ -89,8 +90,43 @@ def _dump(path: Path, obj: dict[str, Any]) -> None:
     path.write_text(json.dumps(obj, indent=2, sort_keys=True) + "\n")
 
 
+def code_sha256() -> str:
+    """Hash of the simulator sources (everything but the detectors), so a stored truth is never
+    read by code that would compute something else."""
+    root = Path(__file__).parent
+    h = hashlib.sha256()
+    for path in sorted(root.rglob("*.py")):
+        if "detect" not in path.relative_to(root).parts:
+            h.update(path.relative_to(root).as_posix().encode())
+            h.update(path.read_bytes())
+    return h.hexdigest()
+
+
+def load_or_compute_truth(params_dir: Path, seed: int, duration_h: float | None,
+                          cache: Path) -> Truth:
+    """The fault-free truth of a seed, stored in `cache` and keyed by the params, the simulator
+    code and the run length. Sensor-only faults and the no-fault run of a seed share it."""
+    params = load_params(params_dir)
+    key = hashlib.sha256(
+        f"{params_sha256(params_dir)}|{code_sha256()}|{duration_h}".encode()).hexdigest()[:16]
+    path = Path(cache) / f"truth_{seed:05d}_{key}.pkl"
+    if path.exists():
+        with path.open("rb") as fh:
+            truth: Truth = pickle.load(fh)
+        return truth
+    duration_s = None if duration_h is None else duration_h * S_PER_HOUR
+    truth = compute_truth(params, draw_seed(params, seed), duration_s, None, None)
+    Path(cache).mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f".{os.getpid()}.tmp")
+    with tmp.open("wb") as fh:
+        pickle.dump(truth, fh, protocol=pickle.HIGHEST_PROTOCOL)
+    tmp.rename(path)
+    return truth
+
+
 def run_seed(params_dir: Path, seed: int, out: Path, fault: FaultConfig,
-             duration_h: float | None = None, force: bool = False) -> dict[str, Any]:
+             duration_h: float | None = None, force: bool = False,
+             truth_cache: Path | None = None) -> dict[str, Any]:
     """Run one seed end to end and write its directory. Returns its batch-manifest entry."""
     final = seed_dir(out, seed)
     if (final / MANIFEST).exists() and not force:
@@ -99,7 +135,10 @@ def run_seed(params_dir: Path, seed: int, out: Path, fault: FaultConfig,
     params = load_params(params_dir)
     draws = draw_seed(params, seed)
     duration_s = None if duration_h is None else duration_h * S_PER_HOUR
-    run = run_mission(params, seed, duration_s=duration_s, fault=fault)
+    baseline = None
+    if truth_cache is not None and reuses_baseline(params, seed, fault):
+        baseline = load_or_compute_truth(params_dir, seed, duration_h, truth_cache)
+    run = run_mission(params, seed, duration_s=duration_s, fault=fault, baseline=baseline)
     tmp = Path(out) / f".tmp_seed_{seed:05d}_{os.getpid()}"
     if tmp.exists():
         shutil.rmtree(tmp)
@@ -153,13 +192,15 @@ def _guarded(runner: Callable[..., dict[str, Any]], args: tuple[Any, ...]) -> di
 
 def run_batch(params_dir: Path, seeds: list[int], out: Path, fault: FaultConfig,
               duration_h: float | None = None, workers: int = 1, force: bool = False,
+              truth_cache: Path | None = None,
               runner: Callable[..., dict[str, Any]] | None = None) -> dict[str, Any]:
     """Run seeds (in parallel processes when workers > 1) and write the batch manifest."""
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     runner = runner or run_seed
     started, t_start = _now(), time.perf_counter()
-    jobs = [(Path(params_dir), s, out, fault, duration_h, force) for s in seeds]
+    extra = () if truth_cache is None else (Path(truth_cache),)
+    jobs = [(Path(params_dir), s, out, fault, duration_h, force, *extra) for s in seeds]
     results: list[dict[str, Any]] = []
     if workers <= 1:
         results = [_guarded(runner, job) for job in jobs]

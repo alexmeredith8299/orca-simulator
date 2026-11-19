@@ -15,6 +15,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
+from functools import cached_property
 
 import numpy as np
 from numpy.typing import NDArray
@@ -24,6 +25,7 @@ from expand3.env.frames import eci_to_ecef, mean_sun_lon_ecef_rad
 from expand3.params import Params, ParamView
 from expand3.timebase import SeedDraws
 from expand3.units import DEG_PER_HOUR_ANGLE, HOURS_PER_DAY, M_PER_KM
+from expand3.vehicle.orbit_jit import rk4_orbit
 
 F64 = NDArray[np.float64]
 
@@ -92,6 +94,14 @@ class OrbitModel:
             cd_area_m2=np.array([v.get("drag.Cd") * v.get("drag.area_m2") for v in views]),
         )
 
+    @cached_property
+    def _spin_t(self) -> F64:
+        """omega_E [pole]_x transposed, so that r @ _spin_t = omega_E (pole x r) for rows r."""
+        px, py, pz = self.pole
+        skew = np.array([[0.0, -pz, py], [pz, 0.0, -px], [-py, px, 0.0]])
+        out: F64 = self.omega_E_rad_s * skew.T
+        return out
+
     def accel(
         self, r: F64, v: F64, a_thr: F64 | None = None, mass_kg: F64 | None = None
     ) -> F64:
@@ -105,7 +115,7 @@ class OrbitModel:
             k = -1.5 * self.J2 * self.mu_km3_s2 * self.R_E_km**2 / rn**5
             acc = acc + k * ((1.0 - 5.0 * z**2 / rn**2) * r + 2.0 * z * self.pole)
         if self.forces.drag:
-            v_rel = v - self.omega_E_rad_s * np.cross(self.pole, r)
+            v_rel = v - r @ self._spin_t  # v - omega_E (pole x r)
             speed = np.sqrt(np.einsum("ki,ki->k", v_rel, v_rel))[:, None]
             rho = density_kg_m3(rn - self.R_E_km, self.rho0_kg_m3, self.h0_km, self.H_km)
             # rho [kg/m^3] * B [m^2/kg] is 1/m; x M_PER_KM gives 1/km, so a is in km/s^2.
@@ -118,6 +128,16 @@ class OrbitModel:
         if a_thr is not None:
             acc = acc + a_thr
         return acc
+
+    def rk4(self, y: F64, dt: float, a_thr: F64, mass_kg: F64) -> F64:
+        """One RK4 step of `deriv` with thrust held over the step, compiled (numba). Equal to
+        `rk4_step` on `deriv` to rounding. Spec: Model: orbit and attitude."""
+        assert self.cd_area_m2 is not None
+        return rk4_orbit(
+            y, dt, a_thr, self.cd_area_m2 / mass_kg, self.mu_km3_s2, self.J2, self.R_E_km,
+            self.omega_E_rad_s, self.pole, self.rho0_kg_m3, self.h0_km, self.H_km,
+            self.forces.j2, self.forces.drag, M_PER_KM,
+        )
 
     def deriv(self, y: F64, a_thr: F64 | None = None, mass_kg: F64 | None = None) -> F64:
         """y is (K, 6) = [r, v]; returns [v, a]."""

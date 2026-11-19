@@ -26,6 +26,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from expand3.params import ParamView
+from expand3.vec3 import cross3
 from expand3.vehicle.attitude import (
     AttitudeState,
     inertia,
@@ -166,7 +167,7 @@ def slew(
         w = state.omega
         tau_d = (
             i_b @ e * thdd
-            + np.cross(w, i_b @ w + wheels.body_momentum(state.h))
+            + cross3(w, i_b @ w + wheels.body_momentum(state.h))
             - kp @ (2.0 * q_err[1:])
             - kd @ (w - e * thd)
         )
