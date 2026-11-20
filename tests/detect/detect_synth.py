@@ -17,7 +17,9 @@ LAMBDA_IN = 5.5e-4
 D0, T_REF, DT_D = 10.0, 293.15, 6.5
 FAULT_VEHICLE = {"gnss_jump": "SAT-2", "gnss_noise": "SAT-2", "tx_fade": "SAT-2",
                  "gyro_bias": "SAT-2", "gyro_scale": "SAT-2", "gyro_noise": "SAT-3",
-                 "gyro_stuck": "SAT-3", "mag_bias": "SAT-2", "mag_noise": "SAT-2",
+                 "gyro_stuck": "SAT-3", "st_dropout": "SAT-3", "st_false_star": "SAT-2",
+                 "st_stuck": "SAT-2", "gnss_outage": "SAT-3", "mag_bias": "SAT-2",
+                 "mag_noise": "SAT-2",
                  "mag_coupling": "SAT-2",
                  "F1": "SAT-2", "F2": "SAT-2", "F3": "SAT-3", "F4": "SAT-3", "F5": "SAT-2",
                  "F6": "SAT-2", "F7": "SAT-2", "F8": "SAT-2", "F9": "SAT-2",
@@ -176,6 +178,21 @@ def _gyro(t: np.ndarray, k: int, fault: str, faulted: bool, available: np.ndarra
     q += 1.0e-5 * rng.standard_normal((n, 4))  # tracker noise, about 2 arcsec
     q /= np.linalg.norm(q, axis=1, keepdims=True)
     post = (t >= ARM_S) & faulted
+    if faulted and fault == "st_false_star":  # a fixed 0.5 deg rotation about one axis
+        half = np.deg2rad(0.5) / 2.0
+        axis = rng.standard_normal(3)
+        axis /= np.linalg.norm(axis)
+        dq = np.concatenate([[np.cos(half)], np.sin(half) * axis])
+        rot = np.stack([q[:, 0] * dq[0] - q[:, 1] * dq[1] - q[:, 2] * dq[2] - q[:, 3] * dq[3],
+                        q[:, 0] * dq[1] + q[:, 1] * dq[0] + q[:, 2] * dq[3] - q[:, 3] * dq[2],
+                        q[:, 0] * dq[2] - q[:, 1] * dq[3] + q[:, 2] * dq[0] + q[:, 3] * dq[1],
+                        q[:, 0] * dq[3] + q[:, 1] * dq[2] - q[:, 2] * dq[1] + q[:, 3] * dq[0]],
+                       axis=1)
+        q = np.where(post[:, None], rot, q)
+    if faulted and fault == "st_stuck":  # the last fix before the arm, repeated
+        first = int(np.argmax(t >= ARM_S))
+        last = max(i for i in range(first) if available[i] > 0)
+        q[first:] = q[last]
     scale = np.where(post & (fault == "gyro_scale"), 1.25, 1.0)[:, None]
     bias = np.where(post & (fault == "gyro_bias"), 5.0e-4, 0.0)[:, None]
     mult = np.where(post & (fault == "gyro_noise"), 5.0, 1.0)[:, None]
@@ -245,7 +262,10 @@ def make_seed(out: Path, seed: int, fault: str, kepler: bool = False) -> Path:
             cols[g] += list(v.astype(float))
         cols["resets"] += [0.0] * n
         cols["field_nT"] += list(np.where(saa, 21000.0, 30000.0) + rng.standard_normal(n))
-        cols["st_available"] += list((rng.random(n) < 0.5).astype(float))
+        avail = (rng.random(n) < 0.5).astype(float)
+        if fault == "st_dropout" and sat == vehicle:
+            avail = np.where(post, 0.0, avail)
+        cols["st_available"] += list(avail)
         for ax in "xyz":
             cols[f"imu_omega_{ax}_rad_s_meas"] += list(5e-5 * rng.standard_normal(n))
     del meas
@@ -260,6 +280,13 @@ def make_seed(out: Path, seed: int, fault: str, kepler: bool = False) -> Path:
     nav_rng = np.random.default_rng(seed + 10_000)  # its own stream: the others are unchanged
     nav = [_gnss_kepler(t, k, fault, sat == vehicle, nav_rng) if kepler
            else _gnss(t, k, fault, sat == vehicle, sat, nav_rng) for k, sat in enumerate(SATS)]
+    if fault == "gnss_outage":  # no fixes from the arm: NaN fixes, the solution still reported
+        out = nav[SATS.index(vehicle)]
+        lost = t >= ARM_S
+        out["gnss_valid"] = np.where(lost, 0.0, out["gnss_valid"])
+        for name in out:
+            if name.startswith("gnss_") and name != "gnss_valid":
+                out[name] = np.where(lost, np.nan, out[name])
     for name in nav[0]:
         cols[name] = [v for fixes in nav for v in fixes[name]]
     mag_rng = np.random.default_rng(seed + 40_000)  # its own stream, as the fixes

@@ -43,7 +43,8 @@ def test_trailing_sum_is_causal() -> None:
 
 def test_registry_names() -> None:
     faults = ("mcd_f2", "mcdn_f8", "mcdn_f9", "mcdn_f10", "mcdn_wheels", "mcdn_burn", "mcdn_gnss",
-              "mcdn_gnssraw", "mcdn_mag", "mcdn_gyro")
+              "mcdn_gnssraw", "mcdn_mag", "mcdn_gyro", "mcdn_stavail", "mcdn_gnssavail",
+              "mcdn_statt")
     assert set(MCDN) == {f"{f}{s}" for f in faults for s in ("", "_sig", "_sig_comms")} | {
         "mcdn_txfade_sig", "mcdn_txfade_sig_comms", "mcdn_gnssrel", "mcdn_gnssrel_comms",
         "mcdn_gnsspeer", "mcdn_gnsspeer_comms"}
@@ -354,3 +355,62 @@ def test_the_gyro_faulted_vehicles_score_stands_out(tmp_path: Path, kind: str,
     top = {t.sat_id: float(np.max(t.score)) for t in traces if t.fault_id == kind}
     others = max(v for s, v in top.items() if s != vehicle)
     assert top[vehicle] > 3.0 * max(others, 1.0), (kind, top)
+
+
+def test_the_missing_fraction_samples_count_absent_fixes(tmp_path: Path) -> None:
+    seeds = make_batch(tmp_path, ["st_dropout", "gnss_outage"], kepler=True)
+    d = SeedData(tmp_path / f"seed_{seeds[0]:05d}")
+    s = MCDN["mcdn_stavail"](CFG, str(PARAMS_DIR)).samples(d, "SAT-3")  # type: ignore[attr-defined]
+    assert 0.35 < np.nanmean(s.y[s.t < d.t_arm_s]) < 0.65  # the tracker is out about half the time
+    assert np.all(s.y[s.t > d.t_arm_s + 600.0] == 1.0)  # and out all the time after the dropout
+    g = SeedData(tmp_path / f"seed_{seeds[1]:05d}")
+    sg = MCDN["mcdn_gnssavail"](CFG, str(PARAMS_DIR)).samples(g, "SAT-3")  # type: ignore[attr-defined]
+    assert np.all(sg.y[sg.t < g.t_arm_s] == 0.0)
+    assert np.all(sg.y[sg.t > g.t_arm_s + 600.0] == 1.0)
+
+
+def test_the_star_tracker_jump_is_the_gyro_less_the_fix_change(tmp_path: Path) -> None:
+    seeds = make_batch(tmp_path, ["none", "st_stuck"], kepler=True)
+    d = SeedData(tmp_path / f"seed_{seeds[0]:05d}")
+    det = MCDN["mcdn_statt"](CFG, str(PARAMS_DIR))
+    s = det.samples(d, "SAT-1")  # type: ignore[attr-defined]
+    assert s.y.shape[1] == 3
+    assert abs(np.std(s.y) - 1.0) < 0.35  # in units of the gyro's noise over the gap
+    assert not s.aux["repeats"].any()
+    stuck = SeedData(tmp_path / f"seed_{seeds[1]:05d}")
+    ss = det.samples(stuck, "SAT-2")  # type: ignore[attr-defined]
+    assert ss.aux["repeats"][ss.t > stuck.t_arm_s + 3600.0].min() >= 5  # type: ignore[operator]
+    sig = MCDN["mcdn_statt_sig"](CFG, str(PARAMS_DIR))
+    sm = sig.samples(d, "SAT-1")  # type: ignore[attr-defined]
+    assert sm.y.shape[1] == 6  # the fix relative to a cluster mate comes with the mates' inputs
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(("kind", "vehicle", "det"), [
+    ("st_dropout", "SAT-3", "mcdn_stavail"), ("gnss_outage", "SAT-3", "mcdn_gnssavail"),
+    ("st_stuck", "SAT-2", "mcdn_statt")])
+def test_the_star_tracker_and_gnss_faulted_vehicles_score_stands_out(
+        tmp_path: Path, kind: str, vehicle: str, det: str) -> None:
+    seeds = make_batch(tmp_path, [*(["none"] * 6), kind], kepler=True)
+    keep: dict[str, object] = {}
+    cfg = replace(CFG, mcd_epochs=40, mcd_batch=64)
+    run_detectors(tmp_path, [det], seeds[:6], seeds[6:], cfg, PARAMS_DIR, keep=keep)
+    traces = keep["traces"][seeds[6]][0][det]  # type: ignore[index]
+    top = {t.sat_id: float(np.max(t.score)) for t in traces if t.fault_id == kind}
+    others = max(v for s, v in top.items() if s != vehicle)
+    assert top[vehicle] > 3.0 * max(others, 1.0), (kind, top)
+
+
+def test_a_false_star_is_one_jump_in_the_first_pair_of_fixes_across_the_arm(
+        tmp_path: Path) -> None:
+    seed = make_batch(tmp_path, ["st_false_star"], kepler=True)[0]
+    d = SeedData(tmp_path / f"seed_{seed:05d}")
+    s = MCDN["mcdn_statt"](CFG, str(PARAMS_DIR)).samples(d, "SAT-2")  # type: ignore[attr-defined]
+    arm = float(d.t_arm_s)  # type: ignore[arg-type]
+    mag = np.sqrt(np.mean(s.y**2, axis=1))
+    first = int(np.argmax(s.t >= arm))
+    # 0.5 deg is 8.7e-3 rad, against 1.5e-3 rad of gyro noise per tick: about 6 sigma over one
+    # tick, 4 over the two ticks of this pair, so 2.4 on the mean of three axes
+    assert mag[first] > 2.0
+    assert np.median(mag[s.t < arm]) < 1.2  # and a healthy pair is near 1
+    assert np.median(mag[first + 1:]) < 1.2  # the offset stays but the jump does not

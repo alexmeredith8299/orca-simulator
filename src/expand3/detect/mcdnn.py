@@ -929,6 +929,229 @@ class McdGyro(_Nn):
         return out
 
 
+# ---- Step 2 sensor faults: the star tracker and the GNSS receiver ----------------------------
+ARCSEC_PER_RAD = 206264.80624709636  # definitional
+ARCSEC_PER_DEG = 3600.0  # definitional
+ST_UNIT_ARCSEC = 100.0  # relative attitudes are scored in units of this, a twentieth of 0.5 deg
+
+
+def _quats(m: dict[str, F64]) -> F64:
+    return np.stack([m[f"st_q_{c}_meas"] for c in "wxyz"], axis=1)
+
+
+def _rotvec(a: F64, b: F64) -> F64:
+    """(n, 3): rotation vector of conj(a) b in rad, taken as the shorter way round (the same
+    vector part as `McdGyro._rate`)."""
+    d = np.stack([
+        a[:, 0] * b[:, 1] - a[:, 1] * b[:, 0] - a[:, 2] * b[:, 3] + a[:, 3] * b[:, 2],
+        a[:, 0] * b[:, 2] + a[:, 1] * b[:, 3] - a[:, 2] * b[:, 0] - a[:, 3] * b[:, 1],
+        a[:, 0] * b[:, 3] - a[:, 1] * b[:, 2] + a[:, 2] * b[:, 1] - a[:, 3] * b[:, 0],
+    ], axis=1)
+    scalar = a[:, 0] * b[:, 0] + a[:, 1] * b[:, 1] + a[:, 2] * b[:, 2] + a[:, 3] * b[:, 3]
+    return np.asarray(2.0 * np.where(scalar[:, None] < 0, -d, d), dtype=np.float64)
+
+
+def _nav_unit(m: dict[str, F64]) -> F64:
+    """(n, 6): the unit vectors of the navigation position and velocity, held between solutions
+    (zero before the first)."""
+    out = []
+    for name, axes in (("nav_r_{}_km_meas", "xyz"), ("nav_v_{}_km_s_meas", "xyz")):
+        v = np.stack([m[name.format(a)] for a in axes], axis=1)
+        idx, _ = hold(np.isfinite(v[:, 0]), 1.0)
+        held = np.where((idx >= 0)[:, None], v[np.maximum(idx, 0)], 0.0)
+        out.append(held / np.maximum(np.linalg.norm(held, axis=1, keepdims=True), 1e-12))
+    return np.concatenate(out, axis=1)
+
+
+class _Fraction(_Nn):
+    """A signal that is present or missing, scored as the fraction missing in blocks of ticks:
+    the network predicts the fraction from the vehicle's context and its navigation unit
+    vectors, and a shift up of the standardized miss is the fault. In `_sig`, and `_sig_comms`
+    through the links, the other vehicles' latest state of the same signal is an input too."""
+
+    block_key = "fraction"
+    fault_ids: tuple[str, ...] = ()
+    cols: tuple[str, ...] = ("missing_fraction",)
+    overrides = (("mcd_epochs", 60), ("mcd_hidden", 32), ("mcd_sigma_floor", 0.05))
+
+    def present(self, d: SeedData, sat: str) -> tuple[F64, F64]:
+        """(present, expected): 1 where the signal is there and 1 where it should be sampled."""
+        raise NotImplementedError
+
+    def signal_block(self, d: SeedData, sat: str) -> F64:
+        present, expected = self.present(d, sat)
+        idx, _ = hold(expected > 0.5, 1.0)  # the latest state, held between samples
+        return np.where(idx >= 0, present[np.maximum(idx, 0)], 1.0)[:, None]
+
+    def samples(self, d: SeedData, sat: str) -> Samples:
+        m = d.measurements(sat)
+        present, expected = self.present(d, sat)
+        start, end = blocks(len(m["t_s"]), self.cfg.mcd_stride)
+        trials = np.add.reduceat(expected, start)
+        missing = np.add.reduceat(expected * (1.0 - present), start)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            y = np.where(trials > 0, missing / trials, np.nan)[:, None]
+        return Samples(m["t_s"][end], end, _nav_unit(m)[end], y,
+                       {"missing": missing, "trials": trials})
+
+    def score(self, d: SeedData, per: dict[str, tuple[Samples, F64, F64]]) -> list[Trace]:
+        out = []
+        for sat, (s, mean, std) in per.items():
+            z = np.nan_to_num((s.y[:, 0] - mean[:, 0]) / std[:, 0])
+            out.append(Trace(sat, self.fault_ids[0], s.t,
+                             gaussian_glr(z, 0.0, 1.0, self.cfg.mcd_window, side="up")))
+        return out
+
+
+class McdStAvail(_Fraction):
+    """st_dropout: whether the star tracker gives a fix. Nominally it gives one about half of the
+    time, the Earth and the Sun taking the other half, in a pattern that repeats every orbit. The
+    network predicts the fraction of missing fixes from the orbit (the navigation unit vectors).
+    A cluster mate flies the same attitude through nearly the same place, so its state is a
+    strong input in the multi-satellite forms."""
+
+    name = "mcdn_stavail"
+    fault_ids = ("st_dropout",)
+    block_key = "stavail"
+
+    def present(self, d: SeedData, sat: str) -> tuple[F64, F64]:
+        m = d.measurements(sat)
+        return m["st_available"].astype(np.float64), np.ones(len(m["t_s"]))
+
+
+class McdGnssAvail(_Fraction):
+    """gnss_outage: whether the receiver gives a fix, on the ticks where it should. Nominally it
+    always does, so the network predicts a fraction of zero, and any shift up is the fault."""
+
+    name = "mcdn_gnssavail"
+    fault_ids = ("gnss_outage",)
+    block_key = "gnssavail"
+
+    def present(self, d: SeedData, sat: str) -> tuple[F64, F64]:
+        m = d.measurements(sat)
+        assert self.params_dir is not None
+        rate = float(load_params(self.params_dir).links.signals["gnss"].rate_s)
+        expected = np.isclose(np.mod(m["t_s"], rate), 0.0).astype(np.float64)
+        return m["gnss_valid"].astype(np.float64), expected
+
+
+class McdStAtt(_Nn):
+    """The star tracker's attitude against what the vehicle already knows (extended faults
+    st_false_star and st_stuck). Between two fixes a few ticks apart the attitude changes by what
+    the gyro read, whatever the Sun-hold law, so the jump in the fix minus the gyro's rotation is
+    noise, scaled by the gyro's noise and the square root of the gap. A false star shows as one
+    jump of 0.5 deg, 6 standard deviations of one gap, at the tick it starts, and the score is the
+    variance of the last few jumps. A stuck tracker repeats a fix exactly, which a noisy sensor
+    never does, so its score is the run of repeats, as for the stuck gyro.
+
+    In `_sig`, and `_sig_comms` through the links, the network also predicts the vehicle's fix
+    relative to the latest fix of the cluster mate closest to it in attitude. All fly the same
+    Sun-hold attitude, so the relative attitude is near zero between slews, and a false star shows
+    as a shift in it that stays. A healthy vehicle differs from only the one mate that has the
+    false star, and the closest mate is another one. The score adds the shift of these three
+    standardized components. Between slews two attitudes agree to tens of arcsec; while either
+    vehicle slews, takes or burns they differ by degrees, and the network could not fit those
+    samples, so a pair further apart than `nn_st_rel_gate_deg` is left out, in training and in
+    testing.
+    """
+
+    name = "mcdn_statt"
+    fault_ids = ("st_false_star", "st_stuck")
+    block_key = "statt"
+    overrides = (("mcd_epochs", 100), ("mcd_hidden", 32), ("mcd_sigma_floor", 0.5))
+
+    @property
+    def cols(self) -> tuple[str, ...]:  # type: ignore[override]
+        jump = ("jump_x", "jump_y", "jump_z")
+        return (*jump, "rel_x", "rel_y", "rel_z") if self.signals else jump
+
+    def signal_block(self, d: SeedData, sat: str) -> F64:
+        """(n, 4): the latest fix, held between fixes (NaN before the first)."""
+        q = _quats(d.measurements(sat))
+        idx, _ = hold(np.isfinite(q[:, 0]), 1.0)
+        return np.where((idx >= 0)[:, None], q[np.maximum(idx, 0)], np.nan)
+
+    def _mates(self, d: SeedData, sat: str) -> list[F64]:
+        """For each cluster mate, (n, 4): its latest fix as the vehicle holds it at each tick,
+        through the crosslink (`comms`) or at once, NaN where it holds none."""
+        seed = self._seed(d)
+        sc = self._scenario()
+        n = len(seed["t"])
+        dt = float(np.median(np.diff(seed["t"])))
+        cluster = next(c for c in sc.clusters if sat in c)
+        out = []
+        for mate in [s for s in slot_order(sat, sc.clusters)[1:]
+                     if s in seed["feats"] and s in cluster]:
+            block = seed["meas"][self.block_key][mate]
+            if self.comms:
+                idx, _ = hold(seed["delivered"][(mate, sat)], dt)
+            else:
+                idx = np.arange(n)
+            out.append(np.where((idx >= 0)[:, None], block[np.maximum(idx, 0)], np.nan))
+        return out
+
+    def samples(self, d: SeedData, sat: str) -> Samples:
+        m = d.measurements(sat)
+        t = m["t_s"]
+        dt = float(np.median(np.diff(t)))
+        q = _quats(m)
+        fix = np.flatnonzero(np.isfinite(q[:, 0]))
+        k = len(self.cols)
+        if len(fix) < 2:
+            return _empty(k, 4)
+        gyro = np.stack([m[f"imu_omega_{a}_rad_s_meas"] for a in "xyz"], axis=1)
+        csum = np.concatenate([np.zeros((1, 3)), np.cumsum(gyro, axis=0)])
+        a, b = fix[:-1], fix[1:]
+        near = (b - a) <= self.cfg.nn_st_gap_ticks
+        a, b = a[near], b[near]
+        if not a.size:
+            return _empty(k, 4)
+        gap = (b - a).astype(np.float64)
+        jump = _rotvec(q[a], q[b])  # what the two fixes say
+        expected = (csum[b] - csum[a]) * dt  # what the gyro read over the same ticks
+        assert self.params_dir is not None
+        sigma = load_params(self.params_dir).links.signals["imu"].model_extra
+        assert sigma is not None
+        unit = float(sigma["sigma_rad_s"]) * dt * np.sqrt(gap)[:, None]
+        y = (jump - expected) / unit
+        repeats = np.zeros(len(fix))
+        same = np.all(q[fix[1:]] == q[fix[:-1]], axis=1)
+        for n in range(1, len(fix)):
+            repeats[n] = repeats[n - 1] + 1.0 if same[n - 1] else 0.0
+        run = np.zeros(len(t))
+        run[fix] = repeats
+        local = np.concatenate([gap[:, None] / self.cfg.nn_st_gap_ticks,
+                                jump * ARCSEC_PER_RAD / ST_UNIT_ARCSEC / 10.0], axis=1)
+        if self.signals:
+            gate = self.cfg.nn_st_rel_gate_deg * ARCSEC_PER_DEG
+            rels = []
+            for mate in self._mates(d, sat):
+                r = _rotvec(np.nan_to_num(mate[b]), q[b]) * ARCSEC_PER_RAD
+                ok = np.isfinite(mate[b][:, 0]) & (np.linalg.norm(r, axis=1) < gate)
+                rels.append(np.where(ok[:, None], r / ST_UNIT_ARCSEC, np.nan))
+            if rels:  # the mate closest in attitude: one with the false star is not that one
+                stack = np.stack(rels)
+                size = np.where(np.isfinite(stack[..., 0]), np.linalg.norm(stack, axis=2), np.inf)
+                pick = np.argmin(size, axis=0)
+                rel = np.take_along_axis(stack, pick[None, :, None], axis=0)[0]
+            else:
+                rel = np.full((len(b), 3), np.nan)
+            y = np.concatenate([y, rel], axis=1)
+        return Samples(t[b], b.astype(np.int64), local, y, {"repeats": run[b]})
+
+    def score(self, d: SeedData, per: dict[str, tuple[Samples, F64, F64]]) -> list[Trace]:
+        out = []
+        for sat, (s, mean, std) in per.items():
+            z = np.nan_to_num((s.y - mean) / std)
+            burst = variance_glr(np.mean(z[:, :3] ** 2, axis=1), self.cfg.nn_st_burst, 3)
+            if z.shape[1] > 3:
+                burst = burst + sum(gaussian_glr(z[:, 3 + j], 0.0, 1.0, self.cfg.nn_st_window)
+                                    for j in range(3))
+            out += [Trace(sat, "st_false_star", s.t, np.asarray(burst)),
+                    Trace(sat, "st_stuck", s.t, s.aux["repeats"].astype(np.float64))]
+        return out
+
+
 # ---- F2: string power, an LSTM like the thermal detectors ------------------------------------
 class McdStrings(_MultiView, McdThermal):
     """F2: each string's power while sunlit, scored for a drop."""
@@ -992,3 +1215,6 @@ MCDN |= {c.name: c for c in (McdGnssPeer, McdGnssPeerComms)}
 MCDN |= _variants(McdMag)
 MCDN |= {c.name: c for c in (McdTxFade, McdTxFadeComms)}
 MCDN |= _variants(McdGyro)
+MCDN |= _variants(McdStAvail)
+MCDN |= _variants(McdGnssAvail)
+MCDN |= _variants(McdStAtt)

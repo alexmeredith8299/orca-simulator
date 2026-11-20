@@ -88,6 +88,10 @@ class DetectConfig:
     nn_txfade_window: int = 60
     nn_mag_window: int = 36
     nn_gyro_window: int = 36
+    nn_st_window: int = 36  # fixes: the attitude against a cluster mate
+    nn_st_burst: int = 3  # fixes: the fix-to-fix jump against the gyro
+    nn_st_gap_ticks: int = 4  # a fix pair further apart than this is not compared
+    nn_st_rel_gate_deg: float = 1.0  # vehicles further apart in attitude than this are not compared
     # raw-signal classifier: trailing windows over the measured signals
     raw_windows_s: tuple[float, ...] = (3600.0, 21600.0)
     raw_count_windows_s: tuple[float, ...] = (21600.0, 86400.0, 1e12)
