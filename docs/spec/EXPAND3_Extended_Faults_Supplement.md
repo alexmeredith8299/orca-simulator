@@ -462,7 +462,8 @@ A rebuild should pass these checks:
   reference. Tests against a mate need a gate of 1 deg, because slews put mates degrees apart.
 - `st_stuck` and `st_false_star` look alike to a detector with peers: a frozen fix drifts away from
   its mates when the attitude changes. With peers, the first alarm on a stuck seed does not
-  name `st_stuck` on 64 of 100 seeds, and it is usually `st_false_star`.
+  name `st_stuck` on 64 of 100 seeds, and it is usually `st_false_star`. The posterior fits one
+  score for each fault and separates them (5 of 5 seeds each with peers).
 - The SAA gate still uses IGRF alone. It does not include the disturbance. F9 and the SAA therefore
   match the spec, and they differ from the field that the magnetometer measures.
 - The drag scale learns only part of a density error. In one test it moved from 1 to about 6, while

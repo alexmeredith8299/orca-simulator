@@ -10,7 +10,7 @@ The CSV lists 46 fault types. Ten are the spec's F1 to F10, so 36 are new.
 
 | State | Faults |
 |---|---|
-| Simulated, detected and documented (14) | `gnss_jump`, `gnss_noise`, `tx_fade`, `mag_bias`, `mag_noise`, `mag_coupling`, `gyro_bias`, `gyro_scale`, `gyro_noise`, `gyro_stuck` (the posterior does not yet separate `gyro_noise` and `gyro_scale`), `st_dropout`, `st_false_star`, `st_stuck`, `gnss_outage` (no posterior yet) |
+| Simulated, detected and documented (14) | `gnss_jump`, `gnss_noise`, `tx_fade`, `mag_bias`, `mag_noise`, `mag_coupling`, `gyro_bias`, `gyro_scale`, `gyro_noise`, `gyro_stuck` (the posterior does not yet separate `gyro_noise` and `gyro_scale`), `st_dropout`, `st_false_star`, `st_stuck`, `gnss_outage` |
 | Not built (22) | See the tables under "Remaining work" |
 
 The documentation of the ten is in `docs/spec/EXPAND3_Extended_Faults_Supplement.md`.
@@ -112,7 +112,10 @@ The sensor group (the first four) is built, with single, multi-satellite and sto
 detectors (`mcdn_stavail`, `mcdn_gnssavail`, `mcdn_statt`). On seeds 100:199, `st_dropout`, `st_stuck` and
 `gnss_outage` are found on 100 of 100 seeds in every form. `st_false_star` is found on 59 of 100 by one
 vehicle and on 100 of 100 with peers. With peers the first alarm on `st_stuck` does not name `st_stuck` on
-64 of 100 seeds. There is no posterior for these four yet. The sensor group is documented in the
+64 of 100 seeds. The posterior (mix seeds 1000:1222, prior 1/29) identifies `gnss_outage` (10 of 10),
+`st_dropout` (10 of 10, 9 before the take) and `st_stuck` (5 of 5) in every form, and `st_false_star` on
+5 of 5 with peers (4 before the take) and 0 of 5 with one vehicle. It also separates `st_stuck` from
+`st_false_star`, which the thresholds do not. The sensor group is documented in the
 supplement. The seeded extended draw now covers more faults, so a
 `--fault-set extended` seed without a forced fault can draw a different fault than before. Forced
 batches are not affected.
