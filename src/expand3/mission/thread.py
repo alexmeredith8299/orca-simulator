@@ -171,6 +171,9 @@ def _unit(x: F64) -> F64:
 # Parameter paths that the orbit integration does not read, so a fault on them leaves the
 # fault-free trajectory valid. Any other path (thruster, mass, drag) re-integrates.
 _SENSOR_ONLY = ("sensor_faults.",)
+# The battery thermistor and heater faults sit under `sensor_faults.` but change the power and
+# thermal truth: the cold-charge inhibit reads the thermistor, and the heater drives the battery.
+_POWER_FAULTS = ("sensor_faults.thermistor.", "sensor_faults.heater.")
 _ORBIT_FREE = ("sensor_faults.", "eps.", "wheels.", "crosslink.", "cdh_upsets.",
                "imager_dark_current.", "thermal.")
 
@@ -682,11 +685,19 @@ def _run_power_thermal(
     steps = []
     temps = np.empty((len(t), len(th.names)))
     ib = th.names.index(BATTERY_NODE)
+    sensed = np.empty(len(t))
+    last_sensed = 0.0
     for n in range(len(t)):
         view.at(float(t[n]))  # faulted parameters (F1, F2, F7) at this tick
         temps[n] = T
         env = thermal_env(q[n, k], r[n, k], sun_u[n], float(shadow[n, k]))
         in_take = take is not None and take.t_take_s <= t[n] < take.t_end_s
+        # The battery thermistor with its faults: a bias, or a reading held at its last value.
+        reading = float(T[ib] + therm_noise[n, ib]) + view.get(
+            "sensor_faults.thermistor.battery_bias_K")
+        if view.get("sensor_faults.thermistor.battery_freeze") <= 0.5 or n == 0:
+            last_sensed = reading
+        sensed[n] = last_sensed
         step, state, T = step_power_and_thermal(
             eps, th, state, T,
             EpsInputs(
@@ -697,12 +708,21 @@ def _run_power_thermal(
                 take=bool(in_take),
                 wheel_power_W=float(wheel_w[n]),
                 edge_off=bool(edge_off[n]),
-                sensed_battery_K=float(T[ib] + therm_noise[n, ib]),
+                sensed_battery_K=float(sensed[n]),
             ),
             env, tick,
         )
         steps.append(step)
-    return history(t, steps), ThermalHistory(t, list(th.names), temps)
+    return history(t, steps), ThermalHistory(t, list(th.names), temps, sensed)
+
+
+def _node_readings(th: ThermalHistory, therm_noise: F64) -> F64:
+    """Node temperatures plus thermistor noise, with the battery column as its faulted thermistor
+    read it."""
+    meas: F64 = th.T_K + therm_noise
+    if th.sensed_battery_K is not None:
+        meas[:, th.names.index(BATTERY_NODE)] = th.sensed_battery_K
+    return meas
 
 
 def _magnetic_signals(
@@ -786,7 +806,7 @@ def _vehicle_signals(
         pack_voltage=volts,
         pack_current=amps,
         string_power=string_power(stream("string_power"), view, t, eps.p_string_W),
-        node_temperature=Sampled(t, th.T_K + therm_noise, th.T_K),
+        node_temperature=Sampled(t, _node_readings(th, therm_noise), th.T_K),
         node_names=list(th.names),
         soc_estimate=Sampled(volts.t_s, soc_meas, eps.soc[every(t, view.get(
             "signals.soc_estimate.rate_s"))]),
@@ -833,7 +853,8 @@ def _pick_fault(
 def _sensor_only(params: Params, fid: str) -> bool:
     """True when the fault changes only what sensors or the radio report, so every truth quantity
     of the fault-free run stays valid."""
-    return all(p.startswith(_SENSOR_ONLY) for p in params.fault(fid).paths)
+    return all(p.startswith(_SENSOR_ONLY) and not p.startswith(_POWER_FAULTS)
+               for p in params.fault(fid).paths)
 
 
 def _arm_fault(

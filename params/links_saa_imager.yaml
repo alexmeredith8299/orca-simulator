@@ -36,3 +36,7 @@ sensor_faults:
   st: {dropout: 0.0, offset_deg: 0.0, stuck: 0.0}
   mag: {bias_nT: 0.0, noise_mult: 1.0, coupling_nT_per_A: 0.0}
   radio: {tx_loss_dB: 0.0}
+  # Step 2 thermal faults. The thermistor acts on the battery reading, which the cold-charge
+  # inhibit also reads. The heater entries force the battery heater on (until the true cutoff) or off.
+  thermistor: {battery_bias_K: 0.0, battery_freeze: 0.0}
+  heater: {battery_stuck_on: 0.0, battery_stuck_off: 0.0}

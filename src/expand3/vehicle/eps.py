@@ -307,6 +307,9 @@ class Eps:
                 on = True
             elif node_t >= off_k:
                 on = False
+            if name == "battery_heater":  # Step 2 faults: forced on, or never on
+                on = (on or self.view.get("sensor_faults.heater.battery_stuck_on") > 0.5) and not (
+                    self.view.get("sensor_faults.heater.battery_stuck_off") > 0.5)
             heaters[name] = on and node_t <= self.cutoff_k
 
         curtailed = n_pos - p_acc

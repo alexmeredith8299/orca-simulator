@@ -39,3 +39,14 @@ st_dropout:    {name: star tracker dropout, vehicle: SAT-3, param: sensor_faults
 st_false_star: {name: star tracker false star, vehicle: SAT-2, param: sensor_faults.st.offset_deg, set_to: 0.5, profile: step}
 st_stuck:      {name: star tracker stuck, vehicle: SAT-4, param: sensor_faults.st.stuck, set_to: 1, profile: step}
 gnss_outage:   {name: GNSS outage, vehicle: SAT-4, param: sensor_faults.gnss.outage, set_to: 1, profile: step, shapes: [step, intermittent], t_on_s: 1800, t_off_s: 3600}
+
+# Thermal group (Step 2). A thermistor bias of +5 K is positive on purpose: a negative bias would
+# cross the 276 K cold-charge inhibit and change the physics. The frozen thermistor holds its last
+# reading. A stuck-on heater runs until the 313 K true-temperature cutoff, and a stuck-off heater
+# never runs, which shows only where the battery is cold enough to want it. The radiator is the
+# white-paint panel on bus_nz, emissivity 0.85 x 0.7 = 0.595, ramped over 6 h.
+temp_sensor_bias:     {name: battery thermistor bias, vehicle: SAT-2, param: sensor_faults.thermistor.battery_bias_K, set_to: 5.0, profile: step, shapes: [step, ramp], t_r_s: 21600}
+temp_sensor_freeze:   {name: battery thermistor freeze, vehicle: SAT-3, param: sensor_faults.thermistor.battery_freeze, set_to: 1, profile: step}
+heater_stuck_on:      {name: battery heater stuck on, vehicle: SAT-3, param: sensor_faults.heater.battery_stuck_on, set_to: 1, profile: step}
+heater_stuck_off:     {name: battery heater stuck off, vehicle: SAT-2, param: sensor_faults.heater.battery_stuck_off, set_to: 1, profile: step}
+radiator_degradation: {name: radiator degradation, vehicle: SAT-2, param: thermal.nodes.bus_nz.epsilon, m: 0.7, profile: ramp, t_r_s: 21600}

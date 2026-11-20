@@ -243,6 +243,7 @@ class ThermalHistory:
     t_s: F64
     names: list[str]
     T_K: F64
+    sensed_battery_K: F64 | None = None  # battery thermistor reading, with its fault
 
     def node(self, name: str) -> F64:
         out: F64 = self.T_K[:, self.names.index(name)]
