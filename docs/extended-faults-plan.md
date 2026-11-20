@@ -2,7 +2,7 @@
 
 Source: `Gantt—EXPAND - Fault Signatures & FDI Methods & Metrics.csv` (not in the repo). The CSV is
 not the spec. Everything below that the spec does not state is an extension, and each value that
-we choose is a default marked "spec silent". Last updated 2026-11-18.
+we choose is a default marked "spec silent". Last updated 2026-11-20.
 
 ## Status
 
@@ -10,8 +10,8 @@ The CSV lists 46 fault types. Ten are the spec's F1 to F10, so 36 are new.
 
 | State | Faults |
 |---|---|
-| Simulated, detected and documented (10) | `gnss_jump`, `gnss_noise`, `tx_fade`, `mag_bias`, `mag_noise`, `mag_coupling`, `gyro_bias`, `gyro_scale`, `gyro_noise`, `gyro_stuck` (the posterior does not yet separate `gyro_noise` and `gyro_scale`) |
-| Not built (26) | See the tables under "Remaining work" |
+| Simulated, detected and documented (14) | `gnss_jump`, `gnss_noise`, `tx_fade`, `mag_bias`, `mag_noise`, `mag_coupling`, `gyro_bias`, `gyro_scale`, `gyro_noise`, `gyro_stuck` (the posterior does not yet separate `gyro_noise` and `gyro_scale`), `st_dropout`, `st_false_star`, `st_stuck`, `gnss_outage` (no posterior yet) |
+| Not built (22) | See the tables under "Remaining work" |
 
 The documentation of the ten is in `docs/spec/EXPAND3_Extended_Faults_Supplement.md`.
 
@@ -108,7 +108,12 @@ Order: the sensor faults, then thermal, then power. The power faults are confusa
 | `capacity_fade` | SAT-2 | Pack capacity x0.75 (3.6 MJ to 2.7 MJ). Capacity is read once per `Eps` today, so it needs a per-tick read | ramp, step |
 | `cell_short` | SAT-2 | Pack open-circuit voltage -3.75 V (one of eight series cells) and capacity x0.75. May reach the 26.4 V undervoltage shed at low SoC | step |
 
-The sensor group (the first four) is built. The seeded extended draw now covers more faults, so a
+The sensor group (the first four) is built, with single, multi-satellite and store-and-forward
+detectors (`mcdn_stavail`, `mcdn_gnssavail`, `mcdn_statt`). On seeds 100:199, `st_dropout`, `st_stuck` and
+`gnss_outage` are found on 100 of 100 seeds in every form. `st_false_star` is found on 59 of 100 by one
+vehicle and on 100 of 100 with peers. With peers the first alarm on `st_stuck` does not name `st_stuck` on
+64 of 100 seeds. There is no posterior for these four yet. The sensor group is documented in the
+supplement. The seeded extended draw now covers more faults, so a
 `--fault-set extended` seed without a forced fault can draw a different fault than before. Forced
 batches are not affected.
 

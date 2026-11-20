@@ -18,6 +18,9 @@ The ten new faults are `gnss_jump`, `gnss_noise`, `tx_fade`, `mag_bias`, `mag_no
 `mag_coupling`, `gyro_bias`, `gyro_scale`, `gyro_noise` and `gyro_stuck`. The four gyro faults use
 the rate gyro and the star tracker that the spec already has, so they need no new sensor.
 
+Four more faults act on the star tracker and on GNSS availability: `st_dropout`, `st_false_star`,
+`st_stuck` and `gnss_outage`. They also use signals that the spec already has.
+
 Someone who has the spec and this document should be able to rebuild all of it. The spec does not
 mention any of these additions. Every value here is a default, and the spec is silent about it. A
 value stays in force until the owner of the spec changes it. The section "Choices where the spec is
@@ -246,6 +249,30 @@ q_k+1) / dt. This is accurate to a few 1e-6 rad/s, about a tenth of the gyro noi
 only where both fixes exist (about a quarter of the ticks). The vehicle turns at about 1.5e-4 rad/s
 in Sun hold, so a scale error of 25 % is 4e-5 rad/s, below the noise of one reading.
 
+## Model: star tracker and GNSS availability (st_dropout, st_false_star, st_stuck, gnss_outage)
+
+These faults change the readings of the sensor and never the motion of the vehicle, so a run with one
+of them reuses the stored fault-free truth of its seed. The values sit in `sensor_faults.st` and
+`sensor_faults.gnss`.
+
+- **st_dropout** (`st.dropout` = 1): the tracker gives no fix. `st_available` is false at every tick
+  and the attitude fields are NaN, as they are when the Sun or the Earth blocks the view.
+- **st_false_star** (`st.offset_deg` = 0.5): every fix is rotated by 0.5 deg (1800 arcsec) about one axis
+  of the tracker frame. The axis is drawn once for each seed, from its own stream, after the noise
+  draws, so no other stream shifts. The fix is still marked available.
+- **st_stuck** (`st.stuck` = 1): the fix repeats the last healthy fix exactly. It is still marked
+  available. A healthy tracker never repeats a fix, because its noise is continuous.
+- **gnss_outage** (`gnss.outage` = 1): the position and velocity are NaN at every fix and `gnss_valid`
+  is false. Nominally `gnss_valid` is true at every fix tick. The navigation filter then predicts
+  without an update and still writes its solution (it coasts).
+
+A healthy tracker is available about half of the time in Sun hold (no fix within 30 deg of the Sun or
+25 deg of the limb), and the longest nominal gap is 98 ticks. The noise is 2 arcsec across the axis
+and 20 arcsec about it. Cluster mates in Sun hold share one attitude to a few tens of arcsec, and the
+difference between two healthy mates is at most 141 arcsec 99.9 % of the time. Mates differ by
+degrees during slews, takes and burns. A false star of 1800 arcsec therefore shows against a mate in
+Sun hold, and against nothing on a single vehicle except as one jump between two fixes.
+
 ## Signals
 
 The Signals table in the spec gains these rows:
@@ -273,6 +300,10 @@ These rows are added to the Faults table:
 | gyro_scale | SAT-2 | `sensor_faults.imu.scale` | 1 | x1.25 | step or ramp, t_r = 6 h |
 | gyro_noise | SAT-3 | `sensor_faults.imu.noise_mult` | 1 | x5 | ramp (t_r = 6 h) or intermittent |
 | gyro_stuck | SAT-3 | `sensor_faults.imu.stuck` | 0 | 1 | step |
+| st_dropout | SAT-3 | `sensor_faults.st.dropout` | 0 | 1 (no fix) | step or intermittent |
+| st_false_star | SAT-2 | `sensor_faults.st.offset_deg` | 0 deg | 0.5 deg about a fixed axis | step |
+| st_stuck | SAT-4 | `sensor_faults.st.stuck` | 0 | 1 | step |
+| gnss_outage | SAT-4 | `sensor_faults.gnss.outage` | 0 | 1 (no fix) | step or intermittent |
 
 In the Profile column, the first shape of each row is the default. Intermittent episodes have a mean
 "on" time of 1800 s and a mean "off" time of 3600 s.
@@ -366,7 +397,8 @@ not include the bias and the noise of the current sensor.
 | `signals.nav.linearize_every_fixes` | 5 |
 | `signals.nav.drag_scale_sigma` | 1.0 |
 | `signals.nav.drag_scale_walk_per_sqrt_s` | 1.0e-3 |
-| `sensor_faults.gnss` | offset_m 0, noise_mult 1 |
+| `sensor_faults.gnss` | offset_m 0, noise_mult 1, outage 0 |
+| `sensor_faults.st` | dropout 0, offset_deg 0, stuck 0 |
 | `sensor_faults.mag` | bias_nT 0, noise_mult 1, coupling_nT_per_A 0 |
 | `sensor_faults.radio` | tx_loss_dB 0 |
 
@@ -425,6 +457,12 @@ A rebuild should pass these checks:
   gyro scores far above a noisy one on the noise score, and a bias step scores above the scale fault
   on the scale score, so one score for each fault cannot fit. They are detected but not identified.
   `gyro_bias` and `gyro_stuck` are identified.
+- A single vehicle sees `st_false_star` only as one jump between two fixes that straddle the arm, so
+  a single-satellite detector finds it on 59 of 100 seeds. Only a cluster mate gives it an absolute
+  reference. Tests against a mate need a gate of 1 deg, because slews put mates degrees apart.
+- `st_stuck` and `st_false_star` look alike to a detector with peers: a frozen fix drifts away from
+  its mates when the attitude changes. With peers, the first alarm on a stuck seed does not
+  name `st_stuck` on 64 of 100 seeds, and it is usually `st_false_star`.
 - The SAA gate still uses IGRF alone. It does not include the disturbance. F9 and the SAA therefore
   match the spec, and they differ from the field that the magnetometer measures.
 - The drag scale learns only part of a density error. In one test it moved from 1 to about 6, while
