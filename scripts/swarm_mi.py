@@ -362,9 +362,11 @@ def stage_null(none: Path, out: Path):
                 for w in WINDOWS:
                     wm = np.concatenate([window_means(v, w) for v in ser])
                     r[f"{name}_win"][w] = shape(wm, with_kappa=False) if len(wm) > 200 else None
+                # Regime spreads are within-seed: the per-seed offset enters Sigma once, as `off`.
+                dm = np.concatenate([v - np.nanmean(v) for v in ser])
                 sd = np.full(len(REGIMES), np.nan)
                 for k in range(len(REGIMES)):
-                    v = cat[ok & (rc == k)]
+                    v = dm[ok & (rc == k)]
                     if len(v) > 200:
                         sd[k] = v.std()
                 sd = np.where(np.isfinite(sd), sd, np.nanmax(sd))
